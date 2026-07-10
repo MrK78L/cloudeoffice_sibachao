@@ -1,0 +1,25 @@
+{
+  "name": "orms-backend",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Backend Lambda functions and AWS SAM infrastructure for ORMS.",
+  "engines": {
+    "node": ">=22 <23"
+  },
+  "scripts": {
+    "install:business": "npm install --prefix functions/business-logic",
+    "install:image": "npm install --prefix functions/image-processor",
+    "install:all": "npm run install:business && npm run install:image",
+    "seed": "node seed-data.mjs",
+    "seed:local": "node seed-data.mjs --endpoint http://localhost:8000 --table cloffice-offices-table --region ap-southeast-1 --create-table",
+    "build": "sam build --config-file samconfig.toml",
+    "deploy": "sam deploy --config-file samconfig.toml --template-file .aws-sam/build/template.yaml",
+    "delete": "sam delete --stack-name cloffice-backend",
+    "logs:business": "sam logs --stack-name cloffice-backend --name cloffice-business-logic --tail",
+    "logs:image": "sam logs --stack-name cloffice-backend --name cloffice-image-processor --tail"
+  },
+  "dependencies": {
+    "@aws-sdk/client-dynamodb": "^3.1084.0",
+    "@aws-sdk/lib-dynamodb": "^3.1084.0"
+  }
+}

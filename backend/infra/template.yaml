@@ -1,0 +1,464 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: AWS::Serverless-2016-10-31
+Description: Office Rental Management System - serverless AWS stack
+
+Parameters:
+  ProjectName:
+    Type: String
+    Default: cloffice
+  AlertEmail:
+    Type: String
+    Default: dev@example.com
+  CorsAllowOrigin:
+    Type: String
+    Default: "*"
+  EnableCloudFront:
+    Type: String
+    Default: "false"
+    AllowedValues:
+      - "true"
+      - "false"
+
+Conditions:
+  CreateCloudFront: !Equals [!Ref EnableCloudFront, "true"]
+
+Globals:
+  Function:
+    Runtime: nodejs22.x
+    Timeout: 20
+    MemorySize: 256
+    Architectures:
+      - x86_64
+    Environment:
+      Variables:
+        CORS_ALLOW_ORIGIN: !Ref CorsAllowOrigin
+  HttpApi:
+    CorsConfiguration:
+      AllowOrigins:
+        - !Ref CorsAllowOrigin
+      AllowHeaders:
+        - Content-Type
+        - Authorization
+      AllowMethods:
+        - GET
+        - POST
+        - PATCH
+        - DELETE
+        - OPTIONS
+
+Resources:
+  FrontendBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub "${ProjectName}-frontend-${AWS::AccountId}-${AWS::Region}"
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+
+  StorageBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub "${ProjectName}-storage-${AWS::AccountId}-${AWS::Region}"
+      CorsConfiguration:
+        CorsRules:
+          - AllowedOrigins:
+              - !Ref CorsAllowOrigin
+            AllowedMethods:
+              - PUT
+              - GET
+              - HEAD
+            AllowedHeaders:
+              - "*"
+            MaxAge: 3000
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+
+  ProcessedBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub "${ProjectName}-processed-${AWS::AccountId}-${AWS::Region}"
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+
+  OfficesTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub "${ProjectName}-offices-table"
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: PK
+          AttributeType: S
+        - AttributeName: SK
+          AttributeType: S
+        - AttributeName: GSI1PK
+          AttributeType: S
+        - AttributeName: GSI1SK
+          AttributeType: S
+        - AttributeName: GSI2PK
+          AttributeType: S
+        - AttributeName: GSI2SK
+          AttributeType: S
+      KeySchema:
+        - AttributeName: PK
+          KeyType: HASH
+        - AttributeName: SK
+          KeyType: RANGE
+      GlobalSecondaryIndexes:
+        - IndexName: GSI1
+          KeySchema:
+            - AttributeName: GSI1PK
+              KeyType: HASH
+            - AttributeName: GSI1SK
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+        - IndexName: GSI2
+          KeySchema:
+            - AttributeName: GSI2PK
+              KeyType: HASH
+            - AttributeName: GSI2SK
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+
+  UserPool:
+    Type: AWS::Cognito::UserPool
+    Properties:
+      UserPoolName: !Sub "${ProjectName}-user-pool"
+      UsernameAttributes:
+        - email
+      AutoVerifiedAttributes:
+        - email
+      Policies:
+        PasswordPolicy:
+          MinimumLength: 8
+          RequireLowercase: true
+          RequireNumbers: true
+          RequireSymbols: false
+          RequireUppercase: true
+
+  UserPoolClient:
+    Type: AWS::Cognito::UserPoolClient
+    Properties:
+      ClientName: !Sub "${ProjectName}-web-client"
+      UserPoolId: !Ref UserPool
+      GenerateSecret: false
+      ExplicitAuthFlows:
+        - ALLOW_USER_PASSWORD_AUTH
+        - ALLOW_REFRESH_TOKEN_AUTH
+        - ALLOW_USER_SRP_AUTH
+
+  AdminUserGroup:
+    Type: AWS::Cognito::UserPoolGroup
+    Properties:
+      GroupName: admin
+      Description: Administrators allowed to access ORMS admin dashboard.
+      Precedence: 0
+      UserPoolId: !Ref UserPool
+
+  HttpApi:
+    Type: AWS::Serverless::HttpApi
+    Properties:
+      Name: !Sub "${ProjectName}-api"
+      Auth:
+        Authorizers:
+          CognitoJwtAuthorizer:
+            IdentitySource: "$request.header.Authorization"
+            JwtConfiguration:
+              issuer: !Sub "https://cognito-idp.${AWS::Region}.amazonaws.com/${UserPool}"
+              audience:
+                - !Ref UserPoolClient
+
+  BusinessLogicFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "${ProjectName}-business-logic"
+      CodeUri: ../functions/business-logic/
+      Handler: app.handler
+      Environment:
+        Variables:
+          TABLE_NAME: !Ref OfficesTable
+          STORAGE_BUCKET_NAME: !Sub "${ProjectName}-storage-${AWS::AccountId}-${AWS::Region}"
+          PROCESSED_BUCKET_NAME: !Sub "${ProjectName}-processed-${AWS::AccountId}-${AWS::Region}"
+          CORS_ALLOW_ORIGIN: !Ref CorsAllowOrigin
+          DYNAMODB_ENDPOINT: ""
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref OfficesTable
+        - S3WritePolicy:
+            BucketName: !Sub "${ProjectName}-storage-${AWS::AccountId}-${AWS::Region}"
+        - S3ReadPolicy:
+            BucketName: !Sub "${ProjectName}-storage-${AWS::AccountId}-${AWS::Region}"
+        - S3ReadPolicy:
+            BucketName: !Sub "${ProjectName}-processed-${AWS::AccountId}-${AWS::Region}"
+      Events:
+        OptionsRoot:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref HttpApi
+            Path: /
+            Method: OPTIONS
+        OptionsProxy:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref HttpApi
+            Path: /{proxy+}
+            Method: OPTIONS
+        GetOffices:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref HttpApi
+            Path: /offices
+            Method: GET
+        GetOffice:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref HttpApi
+            Path: /offices/{id}
+            Method: GET
+        CreateOffice:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref HttpApi
+            Path: /offices
+            Method: POST
+            Auth:
+              Authorizer: CognitoJwtAuthorizer
+        UpdateOffice:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref HttpApi
+            Path: /offices/{id}
+            Method: PATCH
+            Auth:
+              Authorizer: CognitoJwtAuthorizer
+        DeleteOffice:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref HttpApi
+            Path: /offices/{id}
+            Method: DELETE
+            Auth:
+              Authorizer: CognitoJwtAuthorizer
+        CreateRentalRequest:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref HttpApi
+            Path: /rental-requests
+            Method: POST
+            Auth:
+              Authorizer: CognitoJwtAuthorizer
+        GetRentalRequest:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref HttpApi
+            Path: /rental-requests/{id}
+            Method: GET
+            Auth:
+              Authorizer: CognitoJwtAuthorizer
+        CreateUploadUrl:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref HttpApi
+            Path: /contracts/{id}/upload-url
+            Method: POST
+            Auth:
+              Authorizer: CognitoJwtAuthorizer
+        GetMyRentalRequests:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref HttpApi
+            Path: /me/rental-requests
+            Method: GET
+            Auth:
+              Authorizer: CognitoJwtAuthorizer
+        GetMyContracts:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref HttpApi
+            Path: /me/contracts
+            Method: GET
+            Auth:
+              Authorizer: CognitoJwtAuthorizer
+        GetMyProfile:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref HttpApi
+            Path: /me/profile
+            Method: GET
+            Auth:
+              Authorizer: CognitoJwtAuthorizer
+        UpdateMyProfile:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref HttpApi
+            Path: /me/profile
+            Method: PATCH
+            Auth:
+              Authorizer: CognitoJwtAuthorizer
+        AdminRoot:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref HttpApi
+            Path: /admin
+            Method: ANY
+            Auth:
+              Authorizer: CognitoJwtAuthorizer
+        AdminProxy:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref HttpApi
+            Path: /admin/{proxy+}
+            Method: ANY
+            Auth:
+              Authorizer: CognitoJwtAuthorizer
+
+  ImageProcessorFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "${ProjectName}-image-processor"
+      CodeUri: ../functions/image-processor/
+      Handler: index.handler
+      Timeout: 60
+      MemorySize: 512
+      Environment:
+        Variables:
+          PROCESSED_BUCKET_NAME: !Sub "${ProjectName}-processed-${AWS::AccountId}-${AWS::Region}"
+          TABLE_NAME: !Ref OfficesTable
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref OfficesTable
+        - S3ReadPolicy:
+            BucketName: !Sub "${ProjectName}-storage-${AWS::AccountId}-${AWS::Region}"
+        - S3WritePolicy:
+            BucketName: !Sub "${ProjectName}-processed-${AWS::AccountId}-${AWS::Region}"
+      Events:
+        ImageUploaded:
+          Type: S3
+          Properties:
+            Bucket: !Ref StorageBucket
+            Events: s3:ObjectCreated:*
+            Filter:
+              S3Key:
+                Rules:
+                  - Name: prefix
+                    Value: images/
+
+  AlertsTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub "${ProjectName}-alerts-topic"
+      Subscription:
+        - Protocol: email
+          Endpoint: !Ref AlertEmail
+
+  BusinessLogicErrorAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${ProjectName}-lambda-error-alarm"
+      Namespace: AWS/Lambda
+      MetricName: Errors
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref BusinessLogicFunction
+      Statistic: Sum
+      Period: 60
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      AlarmActions:
+        - !Ref AlertsTopic
+
+  FrontendOriginAccessControl:
+    Type: AWS::CloudFront::OriginAccessControl
+    Condition: CreateCloudFront
+    Properties:
+      OriginAccessControlConfig:
+        Name: !Sub "${ProjectName}-frontend-oac"
+        OriginAccessControlOriginType: s3
+        SigningBehavior: always
+        SigningProtocol: sigv4
+
+  FrontendDistribution:
+    Type: AWS::CloudFront::Distribution
+    Condition: CreateCloudFront
+    Properties:
+      DistributionConfig:
+        Enabled: true
+        DefaultRootObject: index.html
+        Origins:
+          - Id: FrontendS3Origin
+            DomainName: !GetAtt FrontendBucket.RegionalDomainName
+            OriginAccessControlId: !Ref FrontendOriginAccessControl
+            S3OriginConfig:
+              OriginAccessIdentity: ""
+        DefaultCacheBehavior:
+          TargetOriginId: FrontendS3Origin
+          ViewerProtocolPolicy: redirect-to-https
+          AllowedMethods:
+            - GET
+            - HEAD
+            - OPTIONS
+          CachedMethods:
+            - GET
+            - HEAD
+          Compress: true
+          ForwardedValues:
+            QueryString: false
+        CustomErrorResponses:
+          - ErrorCode: 403
+            ResponseCode: 200
+            ResponsePagePath: /index.html
+          - ErrorCode: 404
+            ResponseCode: 200
+            ResponsePagePath: /index.html
+
+  FrontendBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Condition: CreateCloudFront
+    Properties:
+      Bucket: !Ref FrontendBucket
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: AllowCloudFrontRead
+            Effect: Allow
+            Principal:
+              Service: cloudfront.amazonaws.com
+            Action: s3:GetObject
+            Resource: !Sub "${FrontendBucket.Arn}/*"
+            Condition:
+              StringEquals:
+                AWS:SourceArn: !Sub "arn:aws:cloudfront::${AWS::AccountId}:distribution/${FrontendDistribution}"
+
+Outputs:
+  ApiUrl:
+    Description: API Gateway endpoint
+    Value: !Sub "https://${HttpApi}.execute-api.${AWS::Region}.amazonaws.com"
+  FrontendBucketName:
+    Description: S3 bucket for frontend build artifacts
+    Value: !Ref FrontendBucket
+  StorageBucketName:
+    Description: S3 bucket for original uploads
+    Value: !Ref StorageBucket
+  ProcessedBucketName:
+    Description: S3 bucket for processed images
+    Value: !Ref ProcessedBucket
+  CloudFrontUrl:
+    Condition: CreateCloudFront
+    Description: CloudFront distribution URL
+    Value: !Sub "https://${FrontendDistribution.DomainName}"
+  CognitoUserPoolId:
+    Description: Cognito User Pool ID
+    Value: !Ref UserPool
+  CognitoClientId:
+    Description: Cognito App Client ID
+    Value: !Ref UserPoolClient
