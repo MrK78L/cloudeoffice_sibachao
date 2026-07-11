@@ -1,4 +1,4 @@
-import { S3Client, GetObjectCommand, PutObjectCommand } from "@aws-sdk/client-s3";
+import { DeleteObjectCommand, GetObjectCommand, PutObjectCommand, S3Client } from "@aws-sdk/client-s3";
 import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
 import { DynamoDBDocumentClient, UpdateCommand } from "@aws-sdk/lib-dynamodb";
 import sharp from "sharp";
@@ -7,6 +7,7 @@ const s3 = new S3Client({});
 const dynamo = DynamoDBDocumentClient.from(new DynamoDBClient({}));
 const processedBucketName = process.env.PROCESSED_BUCKET_NAME;
 const tableName = process.env.TABLE_NAME;
+const maxImageBytes = Number(process.env.MAX_IMAGE_BYTES ?? 10 * 1024 * 1024);
 
 export async function handler(event) {
   for (const record of event.Records ?? []) {
@@ -18,6 +19,13 @@ export async function handler(event) {
       continue;
     }
 
+
+    if (Number(record.s3.object.size ?? 0) > maxImageBytes) {
+      console.warn(`Delete oversized image: ${sourceBucket}/${sourceKey}`);
+      await s3.send(new DeleteObjectCommand({ Bucket: sourceBucket, Key: sourceKey }));
+      continue;
+    }
+
     const object = await s3.send(
       new GetObjectCommand({
         Bucket: sourceBucket,
@@ -26,7 +34,7 @@ export async function handler(event) {
     );
 
     const inputBuffer = await streamToBuffer(object.Body);
-    const outputBuffer = await sharp(inputBuffer)
+    const outputBuffer = await sharp(inputBuffer, { limitInputPixels: 40_000_000, failOn: "error" })
       .rotate()
       .resize({ width: 1280, withoutEnlargement: true })
       .webp({ quality: 82 })

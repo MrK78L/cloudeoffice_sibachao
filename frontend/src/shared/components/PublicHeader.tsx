@@ -12,6 +12,10 @@ export function PublicHeader() {
   const fallbackInitial = (displayName || user?.name || user?.email || "U").trim().charAt(0).toUpperCase();
 
   useEffect(() => {
+    setIsMenuOpen(false);
+  }, [path]);
+
+  useEffect(() => {
     let active = true;
 
     async function loadProfile() {
@@ -24,7 +28,7 @@ export function PublicHeader() {
       try {
         const response = await getMyProfile();
         if (!active) return;
-        setAvatarDataUrl(response.item.avatarDataUrl || user?.picture || "");
+        setAvatarDataUrl(response.item.avatarUrl || response.item.avatarDataUrl || user?.picture || "");
         setDisplayName(response.item.displayName || user?.name || "");
       } catch {
         if (!active) return;
@@ -72,6 +76,9 @@ export function PublicHeader() {
       </nav>
       {isAuthenticated ? (
         <div className="public-account-actions">
+          <button className="public-login" onClick={() => go("/my-appointments")} type="button">
+            Lịch hẹn
+          </button>
           <button className="public-login" onClick={() => go("/my-contracts")} type="button">
             Hợp đồng
           </button>

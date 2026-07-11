@@ -1,9 +1,21 @@
-import { getAdminStats } from "../../features/admin/api/adminApi";
+import { useState } from "react";
+import { downloadAdminReport, getAdminStats } from "../../features/admin/api/adminApi";
 import { useAdminQuery } from "../../features/admin/hooks/useAdminQuery";
+import { navigate } from "../../app/router";
 
 export function AdminDashboardPage() {
   const { data, isLoading, error } = useAdminQuery(getAdminStats, []);
   const stats = data?.item;
+  const [reportError, setReportError] = useState("");
+
+  async function downloadReport(type: "offices" | "customers" | "revenue") {
+    setReportError("");
+    try {
+      await downloadAdminReport(type);
+    } catch {
+      setReportError("Không thể xuất báo cáo lúc này. Vui lòng thử lại.");
+    }
+  }
 
   const cards = [
     { label: "Văn phòng", value: stats?.offices ?? 0, tone: "blue" },
@@ -20,6 +32,7 @@ export function AdminDashboardPage() {
       </div>
 
       {error && <div className="notice danger">{error}</div>}
+      {reportError && <div className="notice danger">{reportError}</div>}
 
       <div className="stats-grid">
         {cards.map((stat) => (
@@ -29,6 +42,17 @@ export function AdminDashboardPage() {
             <small>Dữ liệu từ backend DynamoDB</small>
           </article>
         ))}
+      </div>
+
+      <div className="admin-quick-actions" aria-label="Thao tác nhanh">
+        <span>Thao tác nhanh</span>
+        <button onClick={() => navigate("/admin/offices")} type="button">Thêm văn phòng</button>
+        <button onClick={() => navigate("/admin/requests")} type="button">Duyệt yêu cầu</button>
+        <button onClick={() => navigate("/admin/contracts")} type="button">Quản lý hợp đồng</button>
+        <span>Báo cáo</span>
+        <button onClick={() => void downloadReport("offices")} type="button">CSV văn phòng</button>
+        <button onClick={() => void downloadReport("customers")} type="button">CSV khách hàng</button>
+        <button onClick={() => void downloadReport("revenue")} type="button">CSV doanh thu</button>
       </div>
 
       <div className="bento-grid">

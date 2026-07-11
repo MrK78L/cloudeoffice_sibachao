@@ -1,19 +1,23 @@
 import { FormEvent, useState } from "react";
 import { navigate } from "../app/router";
 import { useAuth } from "../features/auth";
-import { useOffices } from "../features/offices";
-import { formatCurrency } from "../shared/utils/format";
+import { useOffices, type Office } from "../features/offices";
+import { formatCurrency, formatStatus } from "../shared/utils/format";
 
 export function HomePage() {
   const { isAuthenticated } = useAuth();
   const { items: offices, isLoading } = useOffices({ status: "AVAILABLE" });
   const [keyword, setKeyword] = useState("");
+  const [status, setStatus] = useState<Office["status"]>("AVAILABLE");
   const showcaseOffices = offices.slice(0, 3);
 
   function handleSearch(event: FormEvent) {
     event.preventDefault();
     const query = keyword.trim();
-    navigate(query ? `/offices?q=${encodeURIComponent(query)}` : "/offices");
+    const params = new URLSearchParams();
+    if (query) params.set("q", query);
+    params.set("status", status);
+    navigate(`/offices?${params.toString()}`);
   }
 
   return (
@@ -56,17 +60,10 @@ export function HomePage() {
           </label>
           <label>
             Trạng thái
-            <select defaultValue="AVAILABLE">
+            <select onChange={(event) => setStatus(event.target.value as Office["status"])} value={status}>
               <option value="AVAILABLE">Đang trống</option>
               <option value="RESERVED">Đang giữ chỗ</option>
               <option value="LEASED">Đã thuê</option>
-            </select>
-          </label>
-          <label>
-            Dữ liệu
-            <select defaultValue="LIVE">
-              <option value="LIVE">Đang cập nhật</option>
-              <option value="DYNAMODB">Đã xác thực</option>
             </select>
           </label>
           <button type="submit">Tìm ngay</button>
@@ -128,7 +125,7 @@ export function HomePage() {
                 src={office.imageUrl ?? "https://images.unsplash.com/photo-1497366811353-6870744d04b2?auto=format&fit=crop&w=1200&q=82"}
               />
               <div>
-                <span className={`status status-${office.status.toLowerCase()}`}>{office.status}</span>
+                <span className={`status status-${office.status.toLowerCase()}`}>{formatStatus(office.status)}</span>
                 <h3>{office.title}</h3>
                 <p>{office.description || `${office.address} - ${formatCurrency(office.monthlyPrice)}/tháng.`}</p>
               </div>

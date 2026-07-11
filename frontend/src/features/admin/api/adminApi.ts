@@ -1,12 +1,37 @@
-import { apiRequest } from "../../../lib/apiClient";
+import { apiDownload, apiRequest } from "../../../lib/apiClient";
+import type { Appointment } from "../../appointments";
 import type { Office } from "../../offices";
 import type { RentalRequest } from "../../rental-requests";
+import {
+  createPreviewContract,
+  createPreviewCustomer,
+  createPreviewOffice,
+  createPreviewRentalRequest,
+  deletePreviewContract,
+  deletePreviewCustomer,
+  deletePreviewOffice,
+  deletePreviewRentalRequest,
+  getPreviewContracts,
+  getPreviewCustomers,
+  getPreviewAppointments,
+  getPreviewOffices,
+  getPreviewRentalRequests,
+  getPreviewStats,
+  isAdminPreviewMode,
+  updatePreviewContract,
+  updatePreviewCustomer,
+  updatePreviewOffice,
+  updatePreviewRentalRequest,
+  updatePreviewAppointment,
+  uploadPreviewOfficeImage
+} from "./adminPreviewStore";
 
 export type AdminStats = {
   offices: number;
   pendingRentalRequests: number;
   activeContracts: number;
   customers: number;
+  pendingAppointments?: number;
 };
 
 export type Contract = {
@@ -84,49 +109,104 @@ export type CustomerPayload = {
 };
 
 export async function getAdminStats() {
+  if (isAdminPreviewMode) return { item: getPreviewStats() };
   return apiRequest<{ item: AdminStats }>("/admin/stats", { auth: true });
 }
 
 export async function getAdminOffices() {
+  if (isAdminPreviewMode) return { items: getPreviewOffices(), count: getPreviewOffices().length };
   return apiRequest<{ items: Office[]; count: number }>("/admin/offices", { auth: true });
 }
 
 export async function getAdminRentalRequests() {
+  if (isAdminPreviewMode) return { items: getPreviewRentalRequests(), count: getPreviewRentalRequests().length };
   return apiRequest<{ items: RentalRequest[]; count: number }>("/admin/rental-requests", { auth: true });
 }
 
 export async function getAdminContracts() {
+  if (isAdminPreviewMode) return { items: getPreviewContracts(), count: getPreviewContracts().length };
   return apiRequest<{ items: Contract[]; count: number }>("/admin/contracts", { auth: true });
 }
 
 export async function getAdminCustomers() {
+  if (isAdminPreviewMode) return { items: getPreviewCustomers(), count: getPreviewCustomers().length };
   return apiRequest<{ items: Customer[]; count: number }>("/admin/customers", { auth: true });
 }
 
+export async function getAdminAppointments() {
+  if (isAdminPreviewMode) return { items: getPreviewAppointments(), count: getPreviewAppointments().length };
+  return apiRequest<{ items: Appointment[]; count: number }>("/admin/appointments", { auth: true });
+}
+
+export async function updateAdminAppointment(id: string, payload: Pick<Appointment, "status"> & { adminNote?: string }) {
+  if (isAdminPreviewMode) return { item: updatePreviewAppointment(id, payload) };
+  return apiRequest<{ item: Appointment }>(`/admin/appointments/${encodeURIComponent(id)}`, {
+    method: "PATCH",
+    body: payload,
+    auth: true
+  });
+}
+
+export async function downloadAdminReport(type: "offices" | "customers" | "revenue") {
+  if (isAdminPreviewMode) {
+    const rows = type === "offices"
+      ? getPreviewOffices()
+      : type === "customers"
+        ? getPreviewCustomers()
+        : getPreviewContracts().map((item) => ({
+            contractId: item.id,
+            officeId: item.officeId,
+            customerId: item.customerId,
+            status: item.status,
+            monthlyPrice: item.monthlyPrice ?? 0
+          }));
+    const headers = Object.keys(rows[0] ?? { message: "Không có dữ liệu" });
+    const escape = (value: unknown) => `"${String(value ?? "").replace(/"/g, '""')}"`;
+    const csv = [headers.map(escape).join(","), ...rows.map((row) => headers.map((key) => escape((row as Record<string, unknown>)[key])).join(","))].join("\r\n");
+    const url = URL.createObjectURL(new Blob(["\uFEFF", csv], { type: "text/csv;charset=utf-8" }));
+    const anchor = document.createElement("a");
+    anchor.href = url;
+    anchor.download = `cloffice-${type}.csv`;
+    anchor.click();
+    URL.revokeObjectURL(url);
+    return;
+  }
+  return apiDownload(`/admin/reports/${type}.csv`, `cloffice-${type}.csv`);
+}
+
 export async function createAdminOffice(payload: OfficePayload) {
+  if (isAdminPreviewMode) return { item: createPreviewOffice(payload) };
   return apiRequest<{ item: Office }>("/admin/offices", { method: "POST", body: payload, auth: true });
 }
 
 export async function updateAdminOffice(id: string, payload: Partial<OfficePayload>) {
+  if (isAdminPreviewMode) return { item: updatePreviewOffice(id, payload) };
   return apiRequest<{ item: Office }>(`/admin/offices/${encodeURIComponent(id)}`, { method: "PATCH", body: payload, auth: true });
 }
 
 export async function deleteAdminOffice(id: string) {
+  if (isAdminPreviewMode) return { item: deletePreviewOffice(id) };
   return apiRequest<{ item: Office }>(`/admin/offices/${encodeURIComponent(id)}`, { method: "DELETE", auth: true });
 }
 
 export async function createAdminOfficeImageUploadUrl(id: string, file: File) {
+  if (isAdminPreviewMode) return { bucket: "browser-preview", key: `images/offices/${id}/${file.name}`, uploadUrl: `preview://${id}`, expiresIn: 3600 };
   return apiRequest<OfficeImageUploadUrl>(`/admin/offices/${encodeURIComponent(id)}/image-upload-url`, {
     method: "POST",
     body: {
       fileName: file.name,
-      contentType: file.type || "image/jpeg"
+      contentType: file.type || "image/jpeg",
+      fileSize: file.size
     },
     auth: true
   });
 }
 
 export async function uploadOfficeImageToS3(uploadUrl: string, file: File) {
+  if (isAdminPreviewMode && uploadUrl.startsWith("preview://")) {
+    await uploadPreviewOfficeImage(uploadUrl.slice("preview://".length), file);
+    return;
+  }
   const response = await fetch(uploadUrl, {
     method: "PUT",
     headers: {
@@ -141,10 +221,12 @@ export async function uploadOfficeImageToS3(uploadUrl: string, file: File) {
 }
 
 export async function createAdminRentalRequest(payload: RentalRequestPayload) {
+  if (isAdminPreviewMode) return { item: createPreviewRentalRequest(payload) };
   return apiRequest<{ item: RentalRequest }>("/admin/rental-requests", { method: "POST", body: payload, auth: true });
 }
 
 export async function updateAdminRentalRequestStatus(id: string, payload: Pick<RentalRequest, "status"> & { decisionNote?: string }) {
+  if (isAdminPreviewMode) return { item: updatePreviewRentalRequest(id, payload) };
   return apiRequest<{ item: RentalRequest }>(`/admin/rental-requests/${encodeURIComponent(id)}`, {
     method: "PATCH",
     body: payload,
@@ -153,29 +235,36 @@ export async function updateAdminRentalRequestStatus(id: string, payload: Pick<R
 }
 
 export async function deleteAdminRentalRequest(id: string) {
+  if (isAdminPreviewMode) return { item: deletePreviewRentalRequest(id) };
   return apiRequest<{ item: RentalRequest }>(`/admin/rental-requests/${encodeURIComponent(id)}`, { method: "DELETE", auth: true });
 }
 
 export async function createAdminContract(payload: ContractPayload) {
+  if (isAdminPreviewMode) return { item: createPreviewContract(payload) };
   return apiRequest<{ item: Contract }>("/admin/contracts", { method: "POST", body: payload, auth: true });
 }
 
 export async function updateAdminContract(id: string, payload: Partial<ContractPayload>) {
+  if (isAdminPreviewMode) return { item: updatePreviewContract(id, payload) };
   return apiRequest<{ item: Contract }>(`/admin/contracts/${encodeURIComponent(id)}`, { method: "PATCH", body: payload, auth: true });
 }
 
 export async function deleteAdminContract(id: string) {
+  if (isAdminPreviewMode) return { item: deletePreviewContract(id) };
   return apiRequest<{ item: Contract }>(`/admin/contracts/${encodeURIComponent(id)}`, { method: "DELETE", auth: true });
 }
 
 export async function createAdminCustomer(payload: CustomerPayload) {
+  if (isAdminPreviewMode) return { item: createPreviewCustomer(payload) };
   return apiRequest<{ item: Customer }>("/admin/customers", { method: "POST", body: payload, auth: true });
 }
 
 export async function updateAdminCustomer(id: string, payload: Partial<Omit<CustomerPayload, "email">>) {
+  if (isAdminPreviewMode) return { item: updatePreviewCustomer(id, payload) };
   return apiRequest<{ item: Customer }>(`/admin/customers/${encodeURIComponent(id)}`, { method: "PATCH", body: payload, auth: true });
 }
 
 export async function deleteAdminCustomer(id: string) {
+  if (isAdminPreviewMode) return { item: deletePreviewCustomer(id) };
   return apiRequest<{ item: Customer }>(`/admin/customers/${encodeURIComponent(id)}`, { method: "DELETE", auth: true });
 }

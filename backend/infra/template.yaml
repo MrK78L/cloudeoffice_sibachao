@@ -18,9 +18,16 @@ Parameters:
     AllowedValues:
       - "true"
       - "false"
+  CloudFrontWebAclArn:
+    Type: String
+    Default: ""
+    Description: Optional CLOUDFRONT-scope WAFv2 Web ACL ARN created in us-east-1.
 
 Conditions:
   CreateCloudFront: !Equals [!Ref EnableCloudFront, "true"]
+  AttachCloudFrontWaf: !And
+    - !Condition CreateCloudFront
+    - !Not [!Equals [!Ref CloudFrontWebAclArn, ""]]
 
 Globals:
   Function:
@@ -77,6 +84,12 @@ Resources:
         BlockPublicPolicy: true
         IgnorePublicAcls: true
         RestrictPublicBuckets: true
+      LifecycleConfiguration:
+        Rules:
+          - Id: DeleteUnconfirmedUploads
+            Status: Enabled
+            Prefix: uploads/
+            ExpirationInDays: 1
 
   ProcessedBucket:
     Type: AWS::S3::Bucket
@@ -106,6 +119,10 @@ Resources:
           AttributeType: S
         - AttributeName: GSI2SK
           AttributeType: S
+        - AttributeName: GSI3PK
+          AttributeType: S
+        - AttributeName: GSI3SK
+          AttributeType: S
       KeySchema:
         - AttributeName: PK
           KeyType: HASH
@@ -128,7 +145,14 @@ Resources:
               KeyType: RANGE
           Projection:
             ProjectionType: ALL
-
+        - IndexName: GSI3
+          KeySchema:
+            - AttributeName: GSI3PK
+              KeyType: HASH
+            - AttributeName: GSI3SK
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
   UserPool:
     Type: AWS::Cognito::UserPool
     Properties:
@@ -272,6 +296,22 @@ Resources:
             Method: POST
             Auth:
               Authorizer: CognitoJwtAuthorizer
+        ConfirmContractFile:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref HttpApi
+            Path: /contracts/{id}/file
+            Method: POST
+            Auth:
+              Authorizer: CognitoJwtAuthorizer
+        CreateAppointment:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref HttpApi
+            Path: /appointments
+            Method: POST
+            Auth:
+              Authorizer: CognitoJwtAuthorizer
         GetMyRentalRequests:
           Type: HttpApi
           Properties:
@@ -288,6 +328,22 @@ Resources:
             Method: GET
             Auth:
               Authorizer: CognitoJwtAuthorizer
+        GetMyAppointments:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref HttpApi
+            Path: /me/appointments
+            Method: GET
+            Auth:
+              Authorizer: CognitoJwtAuthorizer
+        CancelMyAppointment:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref HttpApi
+            Path: /me/appointments/{id}
+            Method: PATCH
+            Auth:
+              Authorizer: CognitoJwtAuthorizer
         GetMyProfile:
           Type: HttpApi
           Properties:
@@ -302,6 +358,22 @@ Resources:
             ApiId: !Ref HttpApi
             Path: /me/profile
             Method: PATCH
+            Auth:
+              Authorizer: CognitoJwtAuthorizer
+        CreateAvatarUploadUrl:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref HttpApi
+            Path: /me/avatar-upload-url
+            Method: POST
+            Auth:
+              Authorizer: CognitoJwtAuthorizer
+        ConfirmAvatar:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref HttpApi
+            Path: /me/avatar
+            Method: POST
             Auth:
               Authorizer: CognitoJwtAuthorizer
         AdminRoot:
@@ -333,6 +405,7 @@ Resources:
         Variables:
           PROCESSED_BUCKET_NAME: !Sub "${ProjectName}-processed-${AWS::AccountId}-${AWS::Region}"
           TABLE_NAME: !Ref OfficesTable
+          MAX_IMAGE_BYTES: "10485760"
       Policies:
         - DynamoDBCrudPolicy:
             TableName: !Ref OfficesTable
@@ -340,6 +413,8 @@ Resources:
             BucketName: !Sub "${ProjectName}-storage-${AWS::AccountId}-${AWS::Region}"
         - S3WritePolicy:
             BucketName: !Sub "${ProjectName}-processed-${AWS::AccountId}-${AWS::Region}"
+        - S3WritePolicy:
+            BucketName: !Sub "${ProjectName}-storage-${AWS::AccountId}-${AWS::Region}"
       Events:
         ImageUploaded:
           Type: S3
@@ -359,6 +434,32 @@ Resources:
       Subscription:
         - Protocol: email
           Endpoint: !Ref AlertEmail
+
+  ContractExpiryNotifierFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "${ProjectName}-contract-expiry-notifier"
+      CodeUri: ../functions/contract-expiry-notifier/
+      Handler: index.handler
+      Timeout: 30
+      MemorySize: 256
+      Environment:
+        Variables:
+          TABLE_NAME: !Ref OfficesTable
+          ALERT_TOPIC_ARN: !Ref AlertsTopic
+          EXPIRY_WARNING_DAYS: "30"
+      Policies:
+        - DynamoDBReadPolicy:
+            TableName: !Ref OfficesTable
+        - SNSPublishMessagePolicy:
+            TopicName: !GetAtt AlertsTopic.TopicName
+      Events:
+        DailyExpiryCheck:
+          Type: ScheduleV2
+          Properties:
+            ScheduleExpression: cron(0 1 * * ? *)
+            Description: Check active contracts expiring within 30 days.
+            State: ENABLED
 
   BusinessLogicErrorAlarm:
     Type: AWS::CloudWatch::Alarm
@@ -393,6 +494,7 @@ Resources:
     Properties:
       DistributionConfig:
         Enabled: true
+        WebACLId: !If [AttachCloudFrontWaf, !Ref CloudFrontWebAclArn, !Ref "AWS::NoValue"]
         DefaultRootObject: index.html
         Origins:
           - Id: FrontendS3Origin
@@ -456,6 +558,10 @@ Outputs:
     Condition: CreateCloudFront
     Description: CloudFront distribution URL
     Value: !Sub "https://${FrontendDistribution.DomainName}"
+  CloudFrontDistributionId:
+    Condition: CreateCloudFront
+    Description: CloudFront distribution ID used for cache invalidation
+    Value: !Ref FrontendDistribution
   CognitoUserPoolId:
     Description: Cognito User Pool ID
     Value: !Ref UserPool

@@ -1,0 +1,51 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: Optional AWS WAF protection for the Cloud Office CloudFront distribution. Deploy only in us-east-1.
+
+Parameters:
+  ProjectName:
+    Type: String
+    Default: cloffice
+
+Resources:
+  CloudFrontWebAcl:
+    Type: AWS::WAFv2::WebACL
+    Properties:
+      Name: !Sub "${ProjectName}-cloudfront-waf"
+      Scope: CLOUDFRONT
+      DefaultAction:
+        Allow: {}
+      VisibilityConfig:
+        CloudWatchMetricsEnabled: true
+        MetricName: !Sub "${ProjectName}-cloudfront-waf"
+        SampledRequestsEnabled: true
+      Rules:
+        - Name: AWSCommonRuleSet
+          Priority: 0
+          OverrideAction:
+            None: {}
+          Statement:
+            ManagedRuleGroupStatement:
+              VendorName: AWS
+              Name: AWSManagedRulesCommonRuleSet
+          VisibilityConfig:
+            CloudWatchMetricsEnabled: true
+            MetricName: AWSCommonRuleSet
+            SampledRequestsEnabled: true
+        - Name: RateLimitPerIp
+          Priority: 1
+          Action:
+            Block: {}
+          Statement:
+            RateBasedStatement:
+              AggregateKeyType: IP
+              Limit: 1000
+              EvaluationWindowSec: 300
+          VisibilityConfig:
+            CloudWatchMetricsEnabled: true
+            MetricName: RateLimitPerIp
+            SampledRequestsEnabled: true
+
+Outputs:
+  WebAclArn:
+    Description: Pass this ARN to the main stack CloudFrontWebAclArn parameter.
+    Value: !GetAtt CloudFrontWebAcl.Arn

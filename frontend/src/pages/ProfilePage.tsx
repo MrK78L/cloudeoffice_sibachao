@@ -1,13 +1,19 @@
 import { ChangeEvent, FormEvent, useEffect, useState } from "react";
 import { changePassword } from "../features/auth/cognito";
 import { useAuth } from "../features/auth";
-import { getMyProfile, updateMyProfile, type UserProfile } from "../features/account/api/accountApi";
+import {
+  confirmMyAvatar,
+  createMyAvatarUploadUrl,
+  getMyProfile,
+  updateMyProfile,
+  uploadMyAvatar,
+  type UserProfile
+} from "../features/account/api/accountApi";
 import { toFriendlyMessage } from "../lib/friendlyErrors";
 
 type ProfileForm = {
   displayName: string;
   phone: string;
-  avatarDataUrl: string;
 };
 
 type PasswordForm = {
@@ -25,14 +31,15 @@ const emptyPasswordForm: PasswordForm = {
 export function ProfilePage() {
   const { user } = useAuth();
   const [profile, setProfile] = useState<UserProfile | null>(null);
-  const [form, setForm] = useState<ProfileForm>({ displayName: "", phone: "", avatarDataUrl: "" });
+  const [form, setForm] = useState<ProfileForm>({ displayName: "", phone: "" });
   const [passwordForm, setPasswordForm] = useState<PasswordForm>(emptyPasswordForm);
   const [isLoading, setIsLoading] = useState(true);
   const [isSavingProfile, setIsSavingProfile] = useState(false);
+  const [isUploadingAvatar, setIsUploadingAvatar] = useState(false);
   const [isSavingPassword, setIsSavingPassword] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
-  const avatar = form.avatarDataUrl || user?.picture || "";
+  const avatar = profile?.avatarUrl || profile?.avatarDataUrl || user?.picture || "";
   const fallbackInitial = (form.displayName || profile?.email || user?.email || "U").trim().charAt(0).toUpperCase();
 
   useEffect(() => {
@@ -46,8 +53,7 @@ export function ProfilePage() {
         setProfile(response.item);
         setForm({
           displayName: response.item.displayName || user?.name || "",
-          phone: response.item.phone || "",
-          avatarDataUrl: response.item.avatarDataUrl || user?.picture || ""
+          phone: response.item.phone || ""
         });
       })
       .catch((caught) => {
@@ -67,13 +73,23 @@ export function ProfilePage() {
     if (!file) return;
     setError(null);
     setSuccess(null);
+    setIsUploadingAvatar(true);
 
     try {
-      const avatarDataUrl = await resizeImageToAvatar(file);
-      setForm((current) => ({ ...current, avatarDataUrl }));
+      if (!["image/jpeg", "image/png", "image/webp"].includes(file.type)) {
+        throw new Error("Ảnh đại diện phải có định dạng JPG, PNG hoặc WebP.");
+      }
+      if (file.size > 2 * 1024 * 1024) throw new Error("Ảnh đại diện không được vượt quá 2 MB.");
+      const upload = await createMyAvatarUploadUrl(file);
+      await uploadMyAvatar(upload.uploadUrl, file);
+      const response = await confirmMyAvatar(upload.key);
+      setProfile(response.item);
+      setSuccess("Đã cập nhật ảnh đại diện.");
+      window.dispatchEvent(new Event("orms-profile-updated"));
     } catch (caught) {
       setError(toFriendlyMessage(caught, "Không thể xử lý ảnh. Vui lòng chọn ảnh khác."));
     } finally {
+      setIsUploadingAvatar(false);
       event.target.value = "";
     }
   };
@@ -87,8 +103,7 @@ export function ProfilePage() {
     try {
       const response = await updateMyProfile({
         displayName: form.displayName.trim(),
-        phone: form.phone.trim(),
-        avatarDataUrl: form.avatarDataUrl
+        phone: form.phone.trim()
       });
       setProfile(response.item);
       setSuccess("Đã cập nhật hồ sơ cá nhân.");
@@ -140,14 +155,10 @@ export function ProfilePage() {
             <div>
               <strong>{profile?.email || user?.email || "Tài khoản"}</strong>
               <label className="avatar-upload">
-                Chọn ảnh
-                <input accept="image/png,image/jpeg,image/webp,image/gif" onChange={(event) => void handleAvatarChange(event)} type="file" />
+                {isUploadingAvatar ? "Đang tải ảnh..." : "Chọn ảnh"}
+                <input accept="image/png,image/jpeg,image/webp" disabled={isUploadingAvatar} onChange={(event) => void handleAvatarChange(event)} type="file" />
               </label>
-              {form.avatarDataUrl && (
-                <button className="link-button" onClick={() => setForm({ ...form, avatarDataUrl: "" })} type="button">
-                  Gỡ ảnh
-                </button>
-              )}
+              <p className="muted">JPG, PNG hoặc WebP, tối đa 2 MB. Ảnh được lưu riêng tư trên S3.</p>
             </div>
           </div>
 
@@ -193,34 +204,4 @@ export function ProfilePage() {
       </section>
     </main>
   );
-}
-
-async function resizeImageToAvatar(file: File) {
-  if (!file.type.startsWith("image/")) throw new Error("Vui lòng chọn đúng file ảnh.");
-
-  const image = await loadImage(file);
-  const size = 256;
-  const canvas = document.createElement("canvas");
-  canvas.width = size;
-  canvas.height = size;
-  const context = canvas.getContext("2d");
-  if (!context) throw new Error("Không thể xử lý ảnh trên trình duyệt này.");
-
-  const shortestSide = Math.min(image.width, image.height);
-  const sourceX = (image.width - shortestSide) / 2;
-  const sourceY = (image.height - shortestSide) / 2;
-  context.drawImage(image, sourceX, sourceY, shortestSide, shortestSide, 0, 0, size, size);
-
-  const dataUrl = canvas.toDataURL("image/jpeg", 0.82);
-  if (dataUrl.length > 180000) throw new Error("Ảnh đại diện quá lớn. Vui lòng chọn ảnh đơn giản hơn.");
-  return dataUrl;
-}
-
-function loadImage(file: File) {
-  return new Promise<HTMLImageElement>((resolve, reject) => {
-    const image = new Image();
-    image.onload = () => resolve(image);
-    image.onerror = () => reject(new Error("Không thể đọc ảnh này."));
-    image.src = URL.createObjectURL(file);
-  });
 }

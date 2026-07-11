@@ -4,6 +4,11 @@ import { useAuth } from "../../auth";
 
 export function AdminRoute({ children }: { children: ReactNode }) {
   const { isAuthenticated, isAdmin } = useAuth();
+  const isPreviewMode = import.meta.env.DEV && import.meta.env.VITE_BYPASS_ADMIN_AUTH === "true";
+
+  if (isPreviewMode) {
+    return <>{children}</>;
+  }
 
   if (!isAuthenticated) {
     return <LoginPage reason="Vui lòng đăng nhập để tiếp tục vào khu vực quản trị." />;

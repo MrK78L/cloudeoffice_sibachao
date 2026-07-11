@@ -9,7 +9,8 @@
   "scripts": {
     "install:business": "npm install --prefix functions/business-logic",
     "install:image": "npm install --prefix functions/image-processor",
-    "install:all": "npm run install:business && npm run install:image",
+    "install:notifier": "npm install --prefix functions/contract-expiry-notifier",
+    "install:all": "npm run install:business && npm run install:image && npm run install:notifier",
     "seed": "node seed-data.mjs",
     "seed:local": "node seed-data.mjs --endpoint http://localhost:8000 --table cloffice-offices-table --region ap-southeast-1 --create-table",
     "build": "sam build --config-file samconfig.toml",

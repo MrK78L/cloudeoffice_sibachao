@@ -7,9 +7,11 @@ import { AdminCustomersPage } from "../pages/admin/AdminCustomersPage";
 import { AdminDashboardPage } from "../pages/admin/AdminDashboardPage";
 import { AdminOfficesPage } from "../pages/admin/AdminOfficesPage";
 import { AdminRequestsPage } from "../pages/admin/AdminRequestsPage";
+import { AdminAppointmentsPage } from "../pages/admin/AdminAppointmentsPage";
 import { HomePage } from "../pages/HomePage";
 import { LoginPage } from "../pages/LoginPage";
 import { MyContractsPage } from "../pages/MyContractsPage";
+import { MyAppointmentsPage } from "../pages/MyAppointmentsPage";
 import { OfficeDetailPage } from "../pages/OfficeDetailPage";
 import { OfficeSearchPage } from "../pages/OfficeSearchPage";
 import { ProfilePage } from "../pages/ProfilePage";
@@ -88,6 +90,16 @@ export function AppRouter() {
       );
     }
 
+    if (path === "/my-appointments") {
+      return (
+        <PublicLayout>
+          <ProtectedRoute>
+            <MyAppointmentsPage />
+          </ProtectedRoute>
+        </PublicLayout>
+      );
+    }
+
     if (path.startsWith("/admin")) {
       const adminPath = path.replace(/^\/admin\/?/, "");
       return (
@@ -96,9 +108,10 @@ export function AppRouter() {
             {adminPath === "" && <AdminDashboardPage />}
             {adminPath === "offices" && <AdminOfficesPage />}
             {adminPath === "requests" && <AdminRequestsPage />}
+            {adminPath === "appointments" && <AdminAppointmentsPage />}
             {adminPath === "contracts" && <AdminContractsPage />}
             {adminPath === "customers" && <AdminCustomersPage />}
-            {!["", "offices", "requests", "contracts", "customers"].includes(adminPath) && (
+            {!["", "offices", "requests", "appointments", "contracts", "customers"].includes(adminPath) && (
               <AdminDashboardPage />
             )}
           </AdminLayout>

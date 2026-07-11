@@ -21,9 +21,11 @@ export function useOffices(params: OfficeSearchParams = {}) {
         const allowFallback = import.meta.env.DEV && import.meta.env.VITE_USE_DEMO_FALLBACK === "true";
         const query = params.q?.toLowerCase();
         setItems(allowFallback
-          ? query
-            ? fallbackOffices.filter((office) => `${office.title} ${office.address}`.toLowerCase().includes(query))
-            : fallbackOffices
+          ? fallbackOffices.filter((office) => {
+              const matchesQuery = !query || `${office.title} ${office.address}`.toLowerCase().includes(query);
+              const matchesStatus = !params.status || office.status === params.status;
+              return matchesQuery && matchesStatus;
+            })
           : []);
         setError(requestError instanceof Error ? requestError.message : "Không thể tải danh sách văn phòng.");
       })

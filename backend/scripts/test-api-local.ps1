@@ -143,12 +143,37 @@ Invoke-TestApi "Admin create contract" "POST" "/admin/contracts" $adminHeaders @
 Invoke-TestApi "Admin get contract" "GET" "/admin/contracts/$testContractId" $adminHeaders
 Invoke-TestApi "Admin update contract" "PATCH" "/admin/contracts/$testContractId" $adminHeaders @{
   status = "ACTIVE"
-  fileKey = "contracts/local-test.pdf"
 }
-Invoke-TestApi "Admin terminate contract" "DELETE" "/admin/contracts/$testContractId" $adminHeaders
+Invoke-TestApi "Admin transition contract to terminated" "PATCH" "/admin/contracts/$testContractId" $adminHeaders @{
+  status = "TERMINATED"
+}
+Invoke-TestApi "Admin archive terminated contract" "DELETE" "/admin/contracts/$testContractId" $adminHeaders
+
+Write-Host "`n== Appointment APIs ==" -ForegroundColor Cyan
+$appointment = Invoke-TestApi "Create appointment" "POST" "/appointments" $userHeaders @{
+  officeId = "office-d1-1201"
+  customerName = "QA Customer"
+  email = "qa.customer@example.com"
+  phone = "0900000000"
+  scheduledAt = (Get-Date).ToUniversalTime().AddDays(7).ToString("o")
+  note = "Local API appointment test"
+}
+Invoke-TestApi "Admin list appointments" "GET" "/admin/appointments" $adminHeaders
+if ($appointment -and $appointment.item -and $appointment.item.id) {
+  Invoke-TestApi "Admin confirm appointment" "PATCH" "/admin/appointments/$($appointment.item.id)" $adminHeaders @{
+    status = "CONFIRMED"
+  }
+}
+
+Write-Host "`n== Report APIs ==" -ForegroundColor Cyan
+Invoke-TestApi "Export office report" "GET" "/admin/reports/offices.csv" $adminHeaders
 
 Write-Host "`n== Cleanup APIs ==" -ForegroundColor Cyan
 if ($requestId) {
+  Invoke-TestApi "Admin reject completed test request" "PATCH" "/admin/rental-requests/$requestId" $adminHeaders @{
+    status = "REJECTED"
+    decisionNote = "Cleanup local test"
+  }
   Invoke-TestApi "Admin cancel rental request" "DELETE" "/admin/rental-requests/$requestId" $adminHeaders
 }
 Invoke-TestApi "Admin delete office" "DELETE" "/admin/offices/$testOfficeId" $adminHeaders

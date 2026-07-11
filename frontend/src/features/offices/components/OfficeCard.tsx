@@ -1,5 +1,5 @@
 import { navigate } from "../../../app/router";
-import { formatCurrency } from "../../../shared/utils/format";
+import { formatCurrency, formatStatus } from "../../../shared/utils/format";
 import type { Office } from "../types";
 
 type OfficeCardProps = {
@@ -24,7 +24,7 @@ export function OfficeCard({ office, active = false, onSelect }: OfficeCardProps
       <span className="office-row-content">
         <span className="office-row-top">
           <span>{office.title}</span>
-          <span className={`status status-${office.status.toLowerCase()}`}>{office.status}</span>
+          <span className={`status status-${office.status.toLowerCase()}`}>{formatStatus(office.status)}</span>
         </span>
         <strong>{formatCurrency(office.monthlyPrice)}/tháng</strong>
         <small>{office.address}</small>

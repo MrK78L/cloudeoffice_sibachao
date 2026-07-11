@@ -1,4 +1,4 @@
-import { formatCurrency } from "../../../shared/utils/format";
+import { formatCurrency, formatStatus } from "../../../shared/utils/format";
 import type { Office } from "../types";
 
 type OfficeDetailProps = {
@@ -21,7 +21,7 @@ export function OfficeDetail({ office }: OfficeDetailProps) {
   return (
     <article className="office-detail">
       <div className="office-hero-image" style={{ backgroundImage: `url(${imageUrl})` }}>
-        <span className={`status status-${office.status.toLowerCase()}`}>{office.status}</span>
+        <span className={`status status-${office.status.toLowerCase()}`}>{formatStatus(office.status)}</span>
       </div>
       <div className="office-detail-body">
         <p className="eyebrow">Chi tiết văn phòng</p>
@@ -39,7 +39,7 @@ export function OfficeDetail({ office }: OfficeDetailProps) {
         </div>
         <div>
           <dt>Tình trạng</dt>
-          <dd>{office.status}</dd>
+          <dd>{formatStatus(office.status)}</dd>
         </div>
         <div>
           <dt>Khả năng sử dụng</dt>

@@ -5,10 +5,17 @@ import {
   GetCommand,
   PutCommand,
   QueryCommand,
-  ScanCommand,
+  TransactWriteCommand,
   UpdateCommand
 } from "@aws-sdk/lib-dynamodb";
-import { S3Client, GetObjectCommand, PutObjectCommand } from "@aws-sdk/client-s3";
+import {
+  CopyObjectCommand,
+  DeleteObjectCommand,
+  GetObjectCommand,
+  HeadObjectCommand,
+  PutObjectCommand,
+  S3Client
+} from "@aws-sdk/client-s3";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 
 const tableName = process.env.TABLE_NAME;
@@ -40,6 +47,17 @@ const contractStatuses = new Set(["DRAFT", "PENDING_SIGNATURE", "ACTIVE", "EXPIR
 const blockingRentalRequestStatuses = new Set(["PENDING", "APPROVED"]);
 const blockingContractStatuses = new Set(["DRAFT", "PENDING_SIGNATURE", "ACTIVE"]);
 const protectedContractDeleteStatuses = new Set(["PENDING_SIGNATURE", "ACTIVE"]);
+const appointmentStatuses = new Set(["REQUESTED", "CONFIRMED", "COMPLETED", "REJECTED", "CANCELLED"]);
+const contractTransitions = {
+  DRAFT: new Set(["DRAFT", "PENDING_SIGNATURE", "ACTIVE", "TERMINATED"]),
+  PENDING_SIGNATURE: new Set(["PENDING_SIGNATURE", "ACTIVE", "TERMINATED"]),
+  ACTIVE: new Set(["ACTIVE", "EXPIRED", "TERMINATED"]),
+  EXPIRED: new Set(["EXPIRED"]),
+  TERMINATED: new Set(["TERMINATED"])
+};
+const maxOfficeImageBytes = 10 * 1024 * 1024;
+const maxAvatarBytes = 2 * 1024 * 1024;
+const maxContractBytes = 15 * 1024 * 1024;
 
 export async function handler(event) {
   try {
@@ -50,7 +68,9 @@ export async function handler(event) {
     }
 
     const route = await dispatch(request);
-    return json(route.statusCode, route.body);
+    return route.raw
+      ? rawResponse(route.statusCode, route.body, route.headers)
+      : json(route.statusCode, route.body);
   } catch (error) {
     console.error(error);
     const statusCode = error.statusCode ?? 500;
@@ -98,6 +118,16 @@ async function dispatch(request) {
     return ok(await createContractUploadUrl(request, pathParam(path, 1)));
   }
 
+  if (method === "POST" && /^\/contracts\/[^/]+\/file$/.test(path)) {
+    requireAuthenticated(request);
+    return ok(await confirmContractFile(request, pathParam(path, 1)));
+  }
+
+  if (method === "POST" && path === "/appointments") {
+    requireAuthenticated(request);
+    return created(await createAppointment(request));
+  }
+
   if (method === "GET" && path === "/me/rental-requests") {
     requireAuthenticated(request);
     return ok(await listCurrentUserRentalRequests(request));
@@ -108,6 +138,16 @@ async function dispatch(request) {
     return ok(await listCurrentUserContracts(request));
   }
 
+  if (method === "GET" && path === "/me/appointments") {
+    requireAuthenticated(request);
+    return ok(await listCurrentUserAppointments(request));
+  }
+
+  if (method === "PATCH" && /^\/me\/appointments\/[^/]+$/.test(path)) {
+    requireAuthenticated(request);
+    return ok(await cancelCurrentUserAppointment(request, pathParam(path, 2)));
+  }
+
   if (method === "GET" && path === "/me/profile") {
     requireAuthenticated(request);
     return ok(await getCurrentUserProfile(request));
@@ -116,6 +156,16 @@ async function dispatch(request) {
   if (method === "PATCH" && path === "/me/profile") {
     requireAuthenticated(request);
     return ok(await updateCurrentUserProfile(request));
+  }
+
+  if (method === "POST" && path === "/me/avatar-upload-url") {
+    requireAuthenticated(request);
+    return ok(await createAvatarUploadUrl(request));
+  }
+
+  if (method === "POST" && path === "/me/avatar") {
+    requireAuthenticated(request);
+    return ok(await confirmAvatarUpload(request));
   }
 
   if (path === "/admin" || path.startsWith("/admin/")) {
@@ -162,6 +212,21 @@ async function dispatchAdmin(request) {
   if (method === "POST" && /^\/admin\/contracts\/[^/]+\/upload-url$/.test(path)) {
     return ok(await createContractUploadUrl(request, pathParam(path, 2)));
   }
+  if (method === "POST" && /^\/admin\/contracts\/[^/]+\/file$/.test(path)) {
+    return ok(await confirmContractFile(request, pathParam(path, 2)));
+  }
+
+  if (method === "GET" && path === "/admin/appointments") return ok(await listAppointments(request));
+  if (method === "GET" && /^\/admin\/appointments\/[^/]+$/.test(path)) {
+    return ok(await getAppointmentById(pathParam(path, 2)));
+  }
+  if (method === "PATCH" && /^\/admin\/appointments\/[^/]+$/.test(path)) {
+    return ok(await updateAppointmentStatus(request, pathParam(path, 2)));
+  }
+
+  if (method === "GET" && /^\/admin\/reports\/(offices|customers|revenue)\.csv$/.test(path)) {
+    return await exportAdminReport(pathParam(path, 2));
+  }
 
   if (method === "GET" && path === "/admin/customers") return ok(await listCustomers(request));
   if (method === "POST" && path === "/admin/customers") return created(await createCustomer(request));
@@ -175,7 +240,7 @@ async function dispatchAdmin(request) {
 async function listOffices(request, options = {}) {
   const query = request.query.q?.toLowerCase();
   const status = request.query.status;
-  const result = await queryEntity("OFFICE", readLimit(request.query.limit, 50));
+  const result = await queryEntity("OFFICE", readLimit(request.query.limit, 50), request.query.nextToken);
   let items = (result.Items ?? []).map(toOffice);
 
   if (!options.includeInactive) items = items.filter((office) => office.status !== "INACTIVE");
@@ -183,7 +248,7 @@ async function listOffices(request, options = {}) {
   if (query) items = items.filter((office) => `${office.title} ${office.address}`.toLowerCase().includes(query));
   items = await hydrateOfficeImageUrls(items);
 
-  return { items, count: items.length };
+  return { items, count: items.length, nextToken: encodeNextToken(result.LastEvaluatedKey) };
 }
 
 async function getOfficeById(id, options = {}) {
@@ -275,6 +340,7 @@ async function createOfficeImageUploadUrl(request, officeId) {
   const body = parseBody(request.event);
   const fileName = sanitizeFileName(body.fileName ?? "office.jpg");
   const contentType = requireImageContentType(body.contentType);
+  requireFileSize(body.fileSize, maxOfficeImageBytes, "Ảnh văn phòng");
   const extension = extensionFromContentType(contentType);
   const objectKey = `images/offices/${officeId}/${randomUUID()}-${fileName.replace(/\.[^.]+$/, "")}.${extension}`;
 
@@ -297,10 +363,15 @@ async function createRentalRequest(request) {
   const now = new Date().toISOString();
   const id = randomUUID();
   const officeId = requireString(body.officeId, "officeId");
-  const email = requireEmail(body.email, "email");
+  const email = requireEmail(body.email ?? request.claims.email, "email");
   const customerName = requireString(body.customerName, "customerName");
 
+  if (!isAdmin(request) && email !== requireEmail(request.claims.email, "email Cognito")) {
+    throw httpError(403, "Email yêu cầu thuê phải trùng với email tài khoản đang đăng nhập.");
+  }
+
   await assertOfficeExists(officeId);
+  await assertNoOpenRentalRequest(officeId, email);
   await upsertCustomerFromRequest({ request, email, customerName, phone: body.phone, now });
 
   const item = {
@@ -310,6 +381,8 @@ async function createRentalRequest(request) {
     GSI1SK: `REQUEST#${now}#${id}`,
     GSI2PK: `REQUEST#${id}`,
     GSI2SK: "METADATA",
+    GSI3PK: `CUSTOMER#${email}`,
+    GSI3SK: `REQUEST#${now}#${id}`,
     entityType: "RENTAL_REQUEST",
     id,
     officeId,
@@ -343,21 +416,16 @@ async function getRentalRequestById(id) {
 }
 
 async function listRentalRequests(request) {
-  const result = await queryEntity("RENTAL_REQUEST", readLimit(request.query.limit, 100));
+  const result = await queryEntity("RENTAL_REQUEST", readLimit(request.query.limit, 100), request.query.nextToken);
   let items = (result.Items ?? []).map(toRentalRequest);
   if (request.query.status) items = items.filter((item) => item.status === request.query.status);
   if (request.query.officeId) items = items.filter((item) => item.officeId === request.query.officeId);
-  return { items, count: items.length };
+  return { items, count: items.length, nextToken: encodeNextToken(result.LastEvaluatedKey) };
 }
 
 async function listCurrentUserRentalRequests(request) {
-  const email = request.claims.email;
-  const subject = request.claims.sub;
-  const result = await queryEntity("RENTAL_REQUEST", readLimit(request.query.limit, 100));
-  const items = (result.Items ?? [])
-    .map(toRentalRequest)
-    .filter((item) => item.email === email || item.createdBy === subject || item.createdBy === email);
-  return { items, count: items.length };
+  const items = await queryCustomerEntities(request, "REQUEST");
+  return { items: items.map(toRentalRequest), count: items.length };
 }
 
 async function updateRentalRequestStatus(request, id) {
@@ -389,13 +457,119 @@ async function cancelRentalRequest(request, id) {
   return { item: toRentalRequest(result.Attributes) };
 }
 
+async function createAppointment(request) {
+  const body = parseBody(request.event);
+  const now = new Date().toISOString();
+  const id = randomUUID();
+  const officeId = requireString(body.officeId, "officeId");
+  const email = requireEmail(body.email ?? request.claims.email, "email");
+  const customerName = requireString(body.customerName, "customerName");
+  const scheduledAt = requireFutureDateTime(body.scheduledAt, "scheduledAt");
+
+  if (!isAdmin(request) && email !== requireEmail(request.claims.email, "email Cognito")) {
+    throw httpError(403, "Email lịch hẹn phải trùng với email tài khoản đang đăng nhập.");
+  }
+  await assertOfficeExists(officeId);
+  await assertNoDuplicateAppointment(officeId, email, scheduledAt);
+
+  const item = {
+    PK: `OFFICE#${officeId}`,
+    SK: `APPOINTMENT#${id}`,
+    GSI1PK: "ENTITY#APPOINTMENT",
+    GSI1SK: `APPOINTMENT#${scheduledAt}#${id}`,
+    GSI2PK: `APPOINTMENT#${id}`,
+    GSI2SK: "METADATA",
+    GSI3PK: `CUSTOMER#${email}`,
+    GSI3SK: `APPOINTMENT#${scheduledAt}#${id}`,
+    entityType: "APPOINTMENT",
+    id,
+    officeId,
+    customerName,
+    email,
+    phone: optionalString(body.phone),
+    scheduledAt,
+    note: optionalString(body.note),
+    status: "REQUESTED",
+    createdAt: now,
+    updatedAt: now,
+    createdBy: request.claims.sub ?? email,
+    updatedBy: request.claims.sub ?? email
+  };
+  await dynamo.send(new PutCommand({
+    TableName: tableName,
+    Item: item,
+    ConditionExpression: "attribute_not_exists(PK) AND attribute_not_exists(SK)"
+  }));
+  return { item: toAppointment(item) };
+}
+
+async function listAppointments(request) {
+  const result = await queryEntity("APPOINTMENT", readLimit(request.query.limit, 100), request.query.nextToken);
+  let items = (result.Items ?? []).map(toAppointment);
+  if (request.query.status) items = items.filter((item) => item.status === request.query.status);
+  if (request.query.officeId) items = items.filter((item) => item.officeId === request.query.officeId);
+  return { items, count: items.length, nextToken: encodeNextToken(result.LastEvaluatedKey) };
+}
+
+async function listCurrentUserAppointments(request) {
+  const items = await queryCustomerEntities(request, "APPOINTMENT");
+  return { items: items.map(toAppointment), count: items.length };
+}
+
+async function getAppointmentById(id) {
+  const item = await getRawByGsi2(`APPOINTMENT#${id}`, "Không tìm thấy lịch hẹn.");
+  return { item: toAppointment(item) };
+}
+
+async function updateAppointmentStatus(request, id) {
+  const body = parseBody(request.event);
+  const current = await getRawByGsi2(`APPOINTMENT#${id}`, "Không tìm thấy lịch hẹn.");
+  const status = requireEnum(body.status, appointmentStatuses, "status");
+  assertAppointmentTransition(current.status, status, true);
+  const now = new Date().toISOString();
+  const result = await updateItem({
+    key: { PK: current.PK, SK: current.SK },
+    updates: {
+      status,
+      adminNote: body.adminNote === undefined ? current.adminNote : optionalString(body.adminNote),
+      updatedAt: now,
+      updatedBy: request.claims.sub
+    },
+    condition: "attribute_exists(PK) AND attribute_exists(SK)"
+  });
+  return { item: toAppointment(result.Attributes) };
+}
+
+async function cancelCurrentUserAppointment(request, id) {
+  const current = await getRawByGsi2(`APPOINTMENT#${id}`, "Không tìm thấy lịch hẹn.");
+  if (!entityBelongsToCurrentUser(current, request)) throw httpError(403, "Bạn không có quyền hủy lịch hẹn này.");
+  assertAppointmentTransition(current.status, "CANCELLED", false);
+  const now = new Date().toISOString();
+  const result = await updateItem({
+    key: { PK: current.PK, SK: current.SK },
+    updates: { status: "CANCELLED", updatedAt: now, updatedBy: request.claims.sub },
+    condition: "attribute_exists(PK) AND attribute_exists(SK)"
+  });
+  return { item: toAppointment(result.Attributes) };
+}
+
 async function createContract(request) {
   const body = parseBody(request.event);
   const now = new Date().toISOString();
   const id = body.id ? normalizeId(body.id, "id") : randomUUID();
   const officeId = requireString(body.officeId, "officeId");
+  const customerId = requireString(body.customerId ?? body.customerEmail, "customerId").toLowerCase();
+  const rentalRequestId = optionalString(body.rentalRequestId);
+  const status = requireEnum(body.status ?? "DRAFT", contractStatuses, "status");
+  const startDate = optionalDate(body.startDate, "startDate");
+  const endDate = optionalDate(body.endDate, "endDate");
 
   await assertOfficeExists(officeId);
+  await assertCustomerExists(customerId);
+  validateContractDates(startDate, endDate, status);
+  const rentalRequest = rentalRequestId
+    ? await assertRentalRequestMatchesContract(rentalRequestId, officeId, customerId)
+    : null;
 
   const item = {
     PK: `OFFICE#${officeId}`,
@@ -404,15 +578,17 @@ async function createContract(request) {
     GSI1SK: `CONTRACT#${now}#${id}`,
     GSI2PK: `CONTRACT#${id}`,
     GSI2SK: "METADATA",
+    GSI3PK: `CUSTOMER#${customerId}`,
+    GSI3SK: `CONTRACT#${now}#${id}`,
     entityType: "CONTRACT",
     id,
     officeId,
-    customerId: requireString(body.customerId ?? body.customerEmail, "customerId"),
-    rentalRequestId: optionalString(body.rentalRequestId),
+    customerId,
+    rentalRequestId,
     title: optionalString(body.title) || `Hợp đồng ${id}`,
-    status: requireEnum(body.status ?? "DRAFT", contractStatuses, "status"),
-    startDate: optionalString(body.startDate),
-    endDate: optionalString(body.endDate),
+    status,
+    startDate,
+    endDate,
     monthlyPrice: body.monthlyPrice === undefined ? undefined : requirePositiveNumber(body.monthlyPrice, "monthlyPrice"),
     fileKey: optionalString(body.fileKey),
     createdAt: now,
@@ -421,37 +597,37 @@ async function createContract(request) {
     updatedBy: request.claims.sub ?? "admin"
   };
 
-  await dynamo.send(new PutCommand({
-    TableName: tableName,
-    Item: item,
-    ConditionExpression: "attribute_not_exists(PK) AND attribute_not_exists(SK)"
-  }));
+  if (status === "ACTIVE") {
+    await assertNoActiveContract(officeId);
+    await activateNewContract(item, rentalRequest);
+  } else {
+    await dynamo.send(new PutCommand({
+      TableName: tableName,
+      Item: item,
+      ConditionExpression: "attribute_not_exists(PK) AND attribute_not_exists(SK)"
+    }));
+  }
   return { item: toContract(item) };
 }
 
 async function listContracts(request) {
-  const result = await queryEntity("CONTRACT", readLimit(request.query.limit, 100));
+  const result = await queryEntity("CONTRACT", readLimit(request.query.limit, 100), request.query.nextToken);
   let items = (result.Items ?? []).map(toContract);
   if (request.query.status) items = items.filter((item) => item.status === request.query.status);
   if (request.query.officeId) items = items.filter((item) => item.officeId === request.query.officeId);
   if (request.query.customerId) items = items.filter((item) => item.customerId === request.query.customerId);
-  return { items, count: items.length };
+  return { items, count: items.length, nextToken: encodeNextToken(result.LastEvaluatedKey) };
 }
 
 async function listCurrentUserContracts(request) {
-  const email = request.claims.email;
-  const subject = request.claims.sub;
-  const result = await queryEntity("CONTRACT", readLimit(request.query.limit, 100));
-  const items = (result.Items ?? [])
-    .map(toContract)
-    .filter((item) => item.customerId === email || item.customerId === subject || item.createdBy === subject || item.createdBy === email);
-  return { items, count: items.length };
+  const items = await queryCustomerEntities(request, "CONTRACT");
+  return { items: items.map(toContract), count: items.length };
 }
 
 async function getCurrentUserProfile(request) {
   const key = userProfileKey(request.claims.sub);
   const result = await dynamo.send(new GetCommand({ TableName: tableName, Key: key }));
-  if (result.Item) return { item: toUserProfile(result.Item, request.claims) };
+  if (result.Item) return { item: await hydrateUserProfileAvatar(toUserProfile(result.Item, request.claims)) };
   return { item: defaultUserProfile(request.claims) };
 }
 
@@ -473,14 +649,57 @@ async function updateCurrentUserProfile(request) {
     email: request.claims.email ?? existing.Item?.email ?? "",
     displayName: body.displayName === undefined ? existing.Item?.displayName ?? request.claims.name ?? "" : optionalString(body.displayName),
     phone: body.phone === undefined ? existing.Item?.phone ?? "" : optionalString(body.phone),
-    avatarDataUrl: body.avatarDataUrl === undefined ? existing.Item?.avatarDataUrl ?? "" : optionalAvatarDataUrl(body.avatarDataUrl),
+    avatarKey: existing.Item?.avatarKey ?? "",
+    avatarDataUrl: existing.Item?.avatarDataUrl ?? "",
     createdAt: existing.Item?.createdAt ?? now,
     updatedAt: now,
     updatedBy: request.claims.sub
   };
 
   await dynamo.send(new PutCommand({ TableName: tableName, Item: item }));
-  return { item: toUserProfile(item, request.claims) };
+  return { item: await hydrateUserProfileAvatar(toUserProfile(item, request.claims)) };
+}
+
+async function createAvatarUploadUrl(request) {
+  const body = parseBody(request.event);
+  const contentType = requireImageContentType(body.contentType);
+  requireFileSize(body.fileSize, maxAvatarBytes, "Ảnh đại diện");
+  const extension = extensionFromContentType(contentType);
+  const objectKey = `avatars/${request.claims.sub}/${randomUUID()}.${extension}`;
+  const uploadUrl = await getSignedUrl(s3, new PutObjectCommand({
+    Bucket: storageBucketName,
+    Key: objectKey,
+    ContentType: contentType
+  }), { expiresIn: 900 });
+  return { bucket: storageBucketName, key: objectKey, uploadUrl, expiresIn: 900 };
+}
+
+async function confirmAvatarUpload(request) {
+  const body = parseBody(request.event);
+  const key = requireString(body.key, "key");
+  if (!key.startsWith(`avatars/${request.claims.sub}/`)) {
+    throw httpError(400, "Đường dẫn ảnh đại diện không hợp lệ.");
+  }
+  await assertS3ImageObject(storageBucketName, key, maxAvatarBytes, "Ảnh đại diện");
+
+  const profileKey = userProfileKey(request.claims.sub);
+  const existing = await dynamo.send(new GetCommand({ TableName: tableName, Key: profileKey }));
+  const now = new Date().toISOString();
+  const item = {
+    ...(existing.Item ?? defaultUserProfileItem(request.claims, now)),
+    ...profileKey,
+    avatarKey: key,
+    avatarDataUrl: "",
+    updatedAt: now,
+    updatedBy: request.claims.sub
+  };
+  await dynamo.send(new PutCommand({ TableName: tableName, Item: item }));
+
+  const previousKey = existing.Item?.avatarKey;
+  if (previousKey && previousKey !== key && previousKey.startsWith(`avatars/${request.claims.sub}/`)) {
+    await s3.send(new DeleteObjectCommand({ Bucket: storageBucketName, Key: previousKey })).catch(() => undefined);
+  }
+  return { item: await hydrateUserProfileAvatar(toUserProfile(item, request.claims)) };
 }
 
 async function getContractById(id) {
@@ -492,18 +711,40 @@ async function updateContract(request, id) {
   const body = parseBody(request.event);
   const current = await getRawByGsi2(`CONTRACT#${id}`, "Không tìm thấy hợp đồng.");
   const now = new Date().toISOString();
+  const nextStatus = body.status === undefined ? current.status : requireEnum(body.status, contractStatuses, "status");
+  assertContractTransition(current.status, nextStatus);
+  const nextStartDate = body.startDate === undefined ? current.startDate : optionalDate(body.startDate, "startDate");
+  const nextEndDate = body.endDate === undefined ? current.endDate : optionalDate(body.endDate, "endDate");
+  validateContractDates(nextStartDate, nextEndDate, nextStatus);
+
+  const updates = pickDefined({
+    title: body.title === undefined ? undefined : optionalString(body.title),
+    status: body.status === undefined ? undefined : nextStatus,
+    startDate: body.startDate === undefined ? undefined : nextStartDate,
+    endDate: body.endDate === undefined ? undefined : nextEndDate,
+    monthlyPrice: body.monthlyPrice === undefined ? undefined : requirePositiveNumber(body.monthlyPrice, "monthlyPrice"),
+    fileKey: body.fileKey === undefined ? undefined : optionalString(body.fileKey),
+    updatedAt: now,
+    updatedBy: request.claims.sub ?? "admin"
+  });
+
+  if (current.status !== "ACTIVE" && nextStatus === "ACTIVE") {
+    await assertNoActiveContract(current.officeId, current.id);
+    const rentalRequest = current.rentalRequestId
+      ? await assertRentalRequestMatchesContract(current.rentalRequestId, current.officeId, current.customerId)
+      : null;
+    await activateExistingContract(current, updates, rentalRequest);
+    return await getContractById(id);
+  }
+
+  if (current.status === "ACTIVE" && nextStatus !== "ACTIVE") {
+    await deactivateContract(current, updates);
+    return await getContractById(id);
+  }
+
   const result = await updateItem({
     key: { PK: current.PK, SK: current.SK },
-    updates: pickDefined({
-      title: body.title === undefined ? undefined : optionalString(body.title),
-      status: body.status === undefined ? undefined : requireEnum(body.status, contractStatuses, "status"),
-      startDate: body.startDate === undefined ? undefined : optionalString(body.startDate),
-      endDate: body.endDate === undefined ? undefined : optionalString(body.endDate),
-      monthlyPrice: body.monthlyPrice === undefined ? undefined : requirePositiveNumber(body.monthlyPrice, "monthlyPrice"),
-      fileKey: body.fileKey === undefined ? undefined : optionalString(body.fileKey),
-      updatedAt: now,
-      updatedBy: request.claims.sub ?? "admin"
-    }),
+    updates,
     condition: "attribute_exists(PK) AND attribute_exists(SK)"
   });
   return { item: toContract(result.Attributes) };
@@ -524,13 +765,14 @@ async function deleteContract(request, id) {
 async function createContractUploadUrl(request, contractId) {
   const body = parseBody(request.event);
   const contract = await getRawByGsi2(`CONTRACT#${contractId}`, "Không tìm thấy hợp đồng.");
-  if (!isAdmin(request) && contract.createdBy !== request.claims.sub) {
+  if (!isAdmin(request) && !contractBelongsToCurrentUser(contract, request)) {
     throw httpError(403, "Bạn không có quyền upload file cho hợp đồng này.");
   }
 
   const fileName = sanitizeFileName(body.fileName ?? "contract.pdf");
-  const contentType = optionalString(body.contentType) || "application/octet-stream";
-  const objectKey = `contracts/${contractId}/${randomUUID()}-${fileName}`;
+  const contentType = requirePdfContentType(body.contentType);
+  requireFileSize(body.fileSize, maxContractBytes, "Tệp hợp đồng");
+  const objectKey = `uploads/contracts/${contractId}/${randomUUID()}-${fileName.replace(/\.pdf$/i, "")}.pdf`;
   const uploadUrl = await getSignedUrl(s3, new PutObjectCommand({
     Bucket: storageBucketName,
     Key: objectKey,
@@ -540,12 +782,43 @@ async function createContractUploadUrl(request, contractId) {
   return { bucket: storageBucketName, key: objectKey, uploadUrl, expiresIn: 900 };
 }
 
+async function confirmContractFile(request, contractId) {
+  const body = parseBody(request.event);
+  const contract = await getRawByGsi2(`CONTRACT#${contractId}`, "Không tìm thấy hợp đồng.");
+  if (!isAdmin(request) && !contractBelongsToCurrentUser(contract, request)) {
+    throw httpError(403, "Bạn không có quyền cập nhật file cho hợp đồng này.");
+  }
+
+  const uploadKey = requireString(body.key, "key");
+  const expectedPrefix = `uploads/contracts/${contractId}/`;
+  if (!uploadKey.startsWith(expectedPrefix)) throw httpError(400, "Đường dẫn upload hợp đồng không hợp lệ.");
+
+  await assertS3Object(storageBucketName, uploadKey, "application/pdf", maxContractBytes, "Tệp hợp đồng");
+  const finalKey = uploadKey.replace(/^uploads\//, "");
+  await s3.send(new CopyObjectCommand({
+    Bucket: storageBucketName,
+    CopySource: `${storageBucketName}/${encodeS3CopySource(uploadKey)}`,
+    Key: finalKey,
+    ContentType: "application/pdf",
+    MetadataDirective: "REPLACE"
+  }));
+  await s3.send(new DeleteObjectCommand({ Bucket: storageBucketName, Key: uploadKey }));
+
+  const now = new Date().toISOString();
+  const result = await updateItem({
+    key: { PK: contract.PK, SK: contract.SK },
+    updates: { fileKey: finalKey, updatedAt: now, updatedBy: request.claims.sub },
+    condition: "attribute_exists(PK) AND attribute_exists(SK)"
+  });
+  return { item: toContract(result.Attributes) };
+}
+
 async function listCustomers(request) {
-  const result = await queryEntity("CUSTOMER", readLimit(request.query.limit, 100));
+  const result = await queryEntity("CUSTOMER", readLimit(request.query.limit, 100), request.query.nextToken);
   let items = (result.Items ?? []).map(toCustomer);
   const query = request.query.q?.toLowerCase();
   if (query) items = items.filter((item) => `${item.name} ${item.email}`.toLowerCase().includes(query));
-  return { items, count: items.length };
+  return { items, count: items.length, nextToken: encodeNextToken(result.LastEvaluatedKey) };
 }
 
 async function getCustomerById(id) {
@@ -653,21 +926,301 @@ async function upsertCustomerFromRequest({ request, email, customerName, phone, 
   }
 }
 
+async function exportAdminReport(reportFile) {
+  const reportType = reportFile.replace(/\.csv$/i, "");
+  let headers;
+  let rows;
+
+  if (reportType === "offices") {
+    headers = ["id", "title", "address", "areaSqm", "monthlyPrice", "status", "createdAt"];
+    rows = (await listEntityItems("OFFICE")).map(toOffice);
+  } else if (reportType === "customers") {
+    headers = ["id", "name", "email", "phone", "status", "createdAt"];
+    rows = (await listEntityItems("CUSTOMER")).map(toCustomer);
+  } else if (reportType === "revenue") {
+    headers = ["contractId", "officeId", "customerId", "status", "monthlyPrice", "startDate", "endDate"];
+    rows = (await listEntityItems("CONTRACT")).map((item) => ({
+      contractId: item.id,
+      officeId: item.officeId,
+      customerId: item.customerId,
+      status: item.status,
+      monthlyPrice: item.monthlyPrice ?? 0,
+      startDate: item.startDate ?? "",
+      endDate: item.endDate ?? ""
+    }));
+  } else {
+    throw httpError(404, "Loại báo cáo không tồn tại.");
+  }
+
+  const csv = toCsv(headers, rows);
+  return {
+    statusCode: 200,
+    body: `\uFEFF${csv}`,
+    raw: true,
+    headers: {
+      "Content-Type": "text/csv; charset=utf-8",
+      "Content-Disposition": `attachment; filename="cloffice-${reportType}-${new Date().toISOString().slice(0, 10)}.csv"`
+    }
+  };
+}
+
+function toCsv(headers, rows) {
+  const escape = (value) => `"${String(value ?? "").replace(/"/g, '""')}"`;
+  return [
+    headers.map(escape).join(","),
+    ...rows.map((row) => headers.map((header) => escape(row[header])).join(","))
+  ].join("\r\n");
+}
+
 async function getAdminStats() {
-  const [offices, requests, contracts, customers] = await Promise.all([
-    queryEntity("OFFICE", 200),
-    queryEntity("RENTAL_REQUEST", 200),
-    queryEntity("CONTRACT", 200),
-    queryEntity("CUSTOMER", 200)
+  const [offices, requests, contracts, customers, appointments] = await Promise.all([
+    listEntityItems("OFFICE"),
+    listEntityItems("RENTAL_REQUEST"),
+    listEntityItems("CONTRACT"),
+    listEntityItems("CUSTOMER"),
+    listEntityItems("APPOINTMENT")
   ]);
   return {
     item: {
-      offices: offices.Items?.filter((item) => item.status !== "INACTIVE").length ?? 0,
-      pendingRentalRequests: requests.Items?.filter((item) => item.status === "PENDING").length ?? 0,
-      activeContracts: contracts.Items?.filter((item) => item.status === "ACTIVE").length ?? 0,
-      customers: customers.Items?.filter((item) => item.status !== "INACTIVE").length ?? 0
+      offices: offices.filter((item) => item.status !== "INACTIVE").length,
+      pendingRentalRequests: requests.filter((item) => item.status === "PENDING").length,
+      activeContracts: contracts.filter((item) => item.status === "ACTIVE").length,
+      customers: customers.filter((item) => item.status !== "INACTIVE").length,
+      pendingAppointments: appointments.filter((item) => item.status === "REQUESTED").length
     }
   };
+}
+
+async function activateNewContract(contract, rentalRequest) {
+  const now = new Date().toISOString();
+  const transactItems = [
+    {
+      Put: {
+        TableName: tableName,
+        Item: contract,
+        ConditionExpression: "attribute_not_exists(PK) AND attribute_not_exists(SK)"
+      }
+    },
+    activeContractLockPut(contract, now),
+    officeLeaseUpdate(contract.officeId, contract.id, now)
+  ];
+  if (rentalRequest) transactItems.push(rentalRequestApprovalUpdate(rentalRequest, now));
+  await sendContractTransaction(transactItems);
+}
+
+async function activateExistingContract(contract, updates, rentalRequest) {
+  const now = new Date().toISOString();
+  const updateParts = buildUpdateParts(updates);
+  updateParts.values[":expectedStatus"] = contract.status;
+  const transactItems = [
+    {
+      Update: {
+        TableName: tableName,
+        Key: { PK: contract.PK, SK: contract.SK },
+        UpdateExpression: updateParts.expression,
+        ExpressionAttributeNames: updateParts.names,
+        ExpressionAttributeValues: updateParts.values,
+        ConditionExpression: "#status = :expectedStatus"
+      }
+    },
+    activeContractLockPut(contract, now),
+    officeLeaseUpdate(contract.officeId, contract.id, now)
+  ];
+  if (rentalRequest) transactItems.push(rentalRequestApprovalUpdate(rentalRequest, now));
+  await sendContractTransaction(transactItems);
+}
+
+async function deactivateContract(contract, updates) {
+  const now = new Date().toISOString();
+  const updateParts = buildUpdateParts(updates);
+  updateParts.values[":expectedStatus"] = "ACTIVE";
+  const lockKey = activeContractLockKey(contract.officeId);
+  const lock = await dynamo.send(new GetCommand({ TableName: tableName, Key: lockKey }));
+  const transactItems = [
+    {
+      Update: {
+        TableName: tableName,
+        Key: { PK: contract.PK, SK: contract.SK },
+        UpdateExpression: updateParts.expression,
+        ExpressionAttributeNames: updateParts.names,
+        ExpressionAttributeValues: updateParts.values,
+        ConditionExpression: "#status = :expectedStatus"
+      }
+    },
+    {
+      Update: {
+        TableName: tableName,
+        Key: officeKey(contract.officeId),
+        UpdateExpression: "SET #status = :available, updatedAt = :now, updatedBy = :actor REMOVE activeContractId",
+        ExpressionAttributeNames: { "#status": "status" },
+        ExpressionAttributeValues: { ":available": "AVAILABLE", ":now": now, ":actor": "contract-workflow", ":leased": "LEASED" },
+        ConditionExpression: "attribute_exists(PK) AND #status = :leased"
+      }
+    }
+  ];
+  if (lock.Item?.contractId === contract.id) {
+    transactItems.push({
+      Delete: {
+        TableName: tableName,
+        Key: lockKey,
+        ConditionExpression: "contractId = :contractId",
+        ExpressionAttributeValues: { ":contractId": contract.id }
+      }
+    });
+  }
+  await sendContractTransaction(transactItems);
+}
+
+function activeContractLockPut(contract, now) {
+  return {
+    Put: {
+      TableName: tableName,
+      Item: {
+        ...activeContractLockKey(contract.officeId),
+        entityType: "ACTIVE_CONTRACT_LOCK",
+        officeId: contract.officeId,
+        contractId: contract.id,
+        createdAt: now
+      },
+      ConditionExpression: "attribute_not_exists(PK) AND attribute_not_exists(SK)"
+    }
+  };
+}
+
+function officeLeaseUpdate(officeId, contractId, now) {
+  return {
+    Update: {
+      TableName: tableName,
+      Key: officeKey(officeId),
+      UpdateExpression: "SET #status = :leased, activeContractId = :contractId, updatedAt = :now, updatedBy = :actor",
+      ExpressionAttributeNames: { "#status": "status" },
+      ExpressionAttributeValues: {
+        ":leased": "LEASED",
+        ":inactive": "INACTIVE",
+        ":contractId": contractId,
+        ":now": now,
+        ":actor": "contract-workflow"
+      },
+      ConditionExpression: "attribute_exists(PK) AND #status <> :inactive"
+    }
+  };
+}
+
+function rentalRequestApprovalUpdate(rentalRequest, now) {
+  return {
+    Update: {
+      TableName: tableName,
+      Key: { PK: rentalRequest.PK, SK: rentalRequest.SK },
+      UpdateExpression: "SET #status = :approved, updatedAt = :now, updatedBy = :actor",
+      ExpressionAttributeNames: { "#status": "status" },
+      ExpressionAttributeValues: { ":approved": "APPROVED", ":now": now, ":actor": "contract-workflow" },
+      ConditionExpression: "attribute_exists(PK) AND attribute_exists(SK)"
+    }
+  };
+}
+
+async function sendContractTransaction(transactItems) {
+  try {
+    await dynamo.send(new TransactWriteCommand({ TransactItems: transactItems }));
+  } catch (error) {
+    if (error.name === "TransactionCanceledException") {
+      throw httpError(409, "Không thể kích hoạt hợp đồng. Văn phòng có thể đã có hợp đồng hiệu lực hoặc dữ liệu vừa thay đổi.");
+    }
+    throw error;
+  }
+}
+
+async function assertNoActiveContract(officeId, excludedContractId = "") {
+  const children = await queryItemsByPk(`OFFICE#${officeId}`);
+  const active = children.find((item) => item.entityType === "CONTRACT" && item.status === "ACTIVE" && item.id !== excludedContractId);
+  if (active) throw httpError(409, "Văn phòng đã có hợp đồng đang hiệu lực.");
+}
+
+async function assertCustomerExists(customerId) {
+  const customer = await getRawByGsi2(`CUSTOMER#${customerId.toLowerCase()}`, "Không tìm thấy khách hàng của hợp đồng.");
+  if (customer.status === "INACTIVE") throw httpError(409, "Khách hàng đã ngừng hoạt động.");
+  return customer;
+}
+
+async function assertRentalRequestMatchesContract(id, officeId, customerId) {
+  const request = await getRawByGsi2(`REQUEST#${id}`, "Không tìm thấy yêu cầu thuê của hợp đồng.");
+  if (request.officeId !== officeId) throw httpError(409, "Yêu cầu thuê không thuộc văn phòng của hợp đồng.");
+  if (!hasIdentityOverlap(normalizedIdentitySet(request.email, request.createdBy), normalizedIdentitySet(customerId))) {
+    throw httpError(409, "Yêu cầu thuê không thuộc khách hàng của hợp đồng.");
+  }
+  if (["REJECTED", "CANCELLED"].includes(request.status)) {
+    throw httpError(409, "Yêu cầu thuê đã bị từ chối hoặc hủy.");
+  }
+  return request;
+}
+
+function assertContractTransition(currentStatus, nextStatus) {
+  if (!contractTransitions[currentStatus]?.has(nextStatus)) {
+    throw httpError(409, `Không thể chuyển hợp đồng từ ${currentStatus} sang ${nextStatus}.`);
+  }
+}
+
+function validateContractDates(startDate, endDate, status) {
+  if (status === "ACTIVE" && (!startDate || !endDate)) {
+    throw httpError(400, "Hợp đồng hiệu lực phải có ngày bắt đầu và ngày kết thúc.");
+  }
+  if (startDate && endDate && new Date(startDate).getTime() >= new Date(endDate).getTime()) {
+    throw httpError(400, "Ngày bắt đầu hợp đồng phải trước ngày kết thúc.");
+  }
+}
+
+function contractBelongsToCurrentUser(contract, request) {
+  return entityBelongsToCurrentUser({ ...contract, email: contract.customerId }, request);
+}
+
+function activeContractLockKey(officeId) {
+  return { PK: `OFFICE#${officeId}`, SK: "ACTIVE_CONTRACT" };
+}
+
+async function assertNoOpenRentalRequest(officeId, email) {
+  const children = await queryItemsByPk(`OFFICE#${officeId}`);
+  const duplicate = children.find((item) => (
+    item.entityType === "RENTAL_REQUEST" &&
+    item.email?.toLowerCase() === email.toLowerCase() &&
+    blockingRentalRequestStatuses.has(item.status)
+  ));
+  if (duplicate) throw httpError(409, "Bạn đã có một yêu cầu thuê đang được xử lý cho văn phòng này.");
+}
+
+async function assertNoDuplicateAppointment(officeId, email, scheduledAt) {
+  const children = await queryItemsByPk(`OFFICE#${officeId}`);
+  const duplicate = children.find((item) => (
+    item.entityType === "APPOINTMENT" &&
+    item.email?.toLowerCase() === email.toLowerCase() &&
+    item.scheduledAt === scheduledAt &&
+    !["REJECTED", "CANCELLED"].includes(item.status)
+  ));
+  if (duplicate) throw httpError(409, "Bạn đã có lịch hẹn vào thời gian này.");
+}
+
+function assertAppointmentTransition(currentStatus, nextStatus, admin) {
+  const allowed = admin
+    ? {
+        REQUESTED: new Set(["REQUESTED", "CONFIRMED", "REJECTED", "CANCELLED"]),
+        CONFIRMED: new Set(["CONFIRMED", "COMPLETED", "CANCELLED"]),
+        COMPLETED: new Set(["COMPLETED"]),
+        REJECTED: new Set(["REJECTED"]),
+        CANCELLED: new Set(["CANCELLED"])
+      }
+    : {
+        REQUESTED: new Set(["CANCELLED"]),
+        CONFIRMED: new Set(["CANCELLED"])
+      };
+  if (!allowed[currentStatus]?.has(nextStatus)) {
+    throw httpError(409, "Trạng thái lịch hẹn không cho phép thao tác này.");
+  }
+}
+
+function entityBelongsToCurrentUser(entity, request) {
+  return hasIdentityOverlap(
+    normalizedIdentitySet(entity.customerId, entity.email, entity.createdBy),
+    normalizedIdentitySet(request.claims.sub, request.claims.email)
+  );
 }
 
 async function assertOfficeExists(id) {
@@ -699,6 +1252,67 @@ async function hydrateOfficeImageUrl(office) {
   } catch {
     return office;
   }
+}
+
+async function hydrateUserProfileAvatar(profile) {
+  if (!profile.avatarKey || !storageBucketName) return profile;
+  try {
+    const avatarUrl = await getSignedUrl(s3, new GetObjectCommand({
+      Bucket: storageBucketName,
+      Key: profile.avatarKey
+    }), { expiresIn: 3600 });
+    return { ...profile, avatarUrl };
+  } catch {
+    return profile;
+  }
+}
+
+async function assertS3Object(bucket, key, expectedContentType, maximumBytes, label) {
+  let metadata;
+  try {
+    metadata = await s3.send(new HeadObjectCommand({ Bucket: bucket, Key: key }));
+  } catch {
+    throw httpError(400, `${label} chưa được tải lên hoặc không tồn tại.`);
+  }
+  if (metadata.ContentType?.toLowerCase() !== expectedContentType) {
+    await s3.send(new DeleteObjectCommand({ Bucket: bucket, Key: key })).catch(() => undefined);
+    throw httpError(400, `${label} không đúng định dạng.`);
+  }
+  if (!metadata.ContentLength || metadata.ContentLength > maximumBytes) {
+    await s3.send(new DeleteObjectCommand({ Bucket: bucket, Key: key })).catch(() => undefined);
+    throw httpError(400, `${label} vượt quá dung lượng cho phép.`);
+  }
+  if (expectedContentType === "application/pdf") {
+    const object = await s3.send(new GetObjectCommand({ Bucket: bucket, Key: key, Range: "bytes=0-4" }));
+    const prefix = Buffer.from(await object.Body.transformToByteArray()).toString("ascii");
+    if (prefix !== "%PDF-") {
+      await s3.send(new DeleteObjectCommand({ Bucket: bucket, Key: key })).catch(() => undefined);
+      throw httpError(400, "Nội dung tệp không phải tài liệu PDF hợp lệ.");
+    }
+  }
+  return metadata;
+}
+
+async function assertS3ImageObject(bucket, key, maximumBytes, label) {
+  let metadata;
+  try {
+    metadata = await s3.send(new HeadObjectCommand({ Bucket: bucket, Key: key }));
+  } catch {
+    throw httpError(400, `${label} chưa được tải lên hoặc không tồn tại.`);
+  }
+  if (!["image/jpeg", "image/png", "image/webp"].includes(metadata.ContentType?.toLowerCase())) {
+    await s3.send(new DeleteObjectCommand({ Bucket: bucket, Key: key })).catch(() => undefined);
+    throw httpError(400, `${label} không đúng định dạng.`);
+  }
+  if (!metadata.ContentLength || metadata.ContentLength > maximumBytes) {
+    await s3.send(new DeleteObjectCommand({ Bucket: bucket, Key: key })).catch(() => undefined);
+    throw httpError(400, `${label} vượt quá dung lượng cho phép.`);
+  }
+  return metadata;
+}
+
+function encodeS3CopySource(key) {
+  return key.split("/").map(encodeURIComponent).join("/");
 }
 
 async function assertOfficeCanBeDeleted(id) {
@@ -815,40 +1429,16 @@ async function queryItemsByPk(pk) {
 }
 
 async function listEntityItems(entityType) {
-  try {
-    const items = [];
-    let exclusiveStartKey;
-
-    do {
-      const result = await dynamo.send(new QueryCommand({
-        TableName: tableName,
-        IndexName: "GSI1",
-        KeyConditionExpression: "GSI1PK = :pk",
-        ExpressionAttributeValues: { ":pk": `ENTITY#${entityType}` },
-        ScanIndexForward: false,
-        ExclusiveStartKey: exclusiveStartKey
-      }));
-      items.push(...(result.Items ?? []));
-      exclusiveStartKey = result.LastEvaluatedKey;
-    } while (exclusiveStartKey);
-
-    if (items.length > 0) return items;
-    return await scanEntityItems(entityType);
-  } catch (error) {
-    if (error.name !== "ValidationException") throw error;
-    return await scanEntityItems(entityType);
-  }
-}
-
-async function scanEntityItems(entityType) {
   const items = [];
   let exclusiveStartKey;
 
   do {
-    const result = await dynamo.send(new ScanCommand({
+    const result = await dynamo.send(new QueryCommand({
       TableName: tableName,
-      FilterExpression: "entityType = :entityType",
-      ExpressionAttributeValues: { ":entityType": entityType },
+      IndexName: "GSI1",
+      KeyConditionExpression: "GSI1PK = :pk",
+      ExpressionAttributeValues: { ":pk": `ENTITY#${entityType}` },
+      ScanIndexForward: false,
       ExclusiveStartKey: exclusiveStartKey
     }));
     items.push(...(result.Items ?? []));
@@ -858,37 +1448,56 @@ async function scanEntityItems(entityType) {
   return items;
 }
 
-async function queryEntity(entityType, limit) {
-  try {
-    const result = await dynamo.send(new QueryCommand({
-      TableName: tableName,
-      IndexName: "GSI1",
-      KeyConditionExpression: "GSI1PK = :pk",
-      ExpressionAttributeValues: { ":pk": `ENTITY#${entityType}` },
-      ScanIndexForward: false,
-      Limit: limit
-    }));
-    if ((result.Items ?? []).length > 0) return result;
-    return await scanEntity(entityType, limit);
-  } catch (error) {
-    if (error.name !== "ValidationException") throw error;
-    return await scanEntity(entityType, limit);
-  }
-}
-
-async function scanEntity(entityType, limit) {
-  return await dynamo.send(new ScanCommand({
+async function queryEntity(entityType, limit, nextToken) {
+  return await dynamo.send(new QueryCommand({
     TableName: tableName,
-    FilterExpression: "entityType = :entityType",
-    ExpressionAttributeValues: { ":entityType": entityType },
-    Limit: limit
+    IndexName: "GSI1",
+    KeyConditionExpression: "GSI1PK = :pk",
+    ExpressionAttributeValues: { ":pk": `ENTITY#${entityType}` },
+    ScanIndexForward: false,
+    Limit: limit,
+    ExclusiveStartKey: decodeNextToken(nextToken)
   }));
 }
 
+async function queryCustomerEntities(request, entityPrefix) {
+  const identities = [...normalizedIdentitySet(request.claims.email, request.claims.sub)];
+  const results = await Promise.all(identities.map((identity) => dynamo.send(new QueryCommand({
+    TableName: tableName,
+    IndexName: "GSI3",
+    KeyConditionExpression: "GSI3PK = :pk AND begins_with(GSI3SK, :prefix)",
+    ExpressionAttributeValues: {
+      ":pk": `CUSTOMER#${identity}`,
+      ":prefix": `${entityPrefix}#`
+    },
+    ScanIndexForward: false,
+    Limit: 200
+  }))));
+
+  const byId = new Map();
+  for (const result of results) {
+    for (const item of result.Items ?? []) byId.set(`${item.PK}|${item.SK}`, item);
+  }
+  return [...byId.values()];
+}
+
 async function updateItem({ key, updates, condition }) {
+  const parts = buildUpdateParts(updates);
+
+  return await dynamo.send(new UpdateCommand({
+    TableName: tableName,
+    Key: key,
+    UpdateExpression: parts.expression,
+    ExpressionAttributeNames: parts.names,
+    ExpressionAttributeValues: parts.values,
+    ConditionExpression: condition,
+    ReturnValues: "ALL_NEW"
+  }));
+}
+
+function buildUpdateParts(updates) {
   const entries = Object.entries(updates).filter(([, value]) => value !== undefined);
   if (entries.length === 0) throw httpError(400, "Không có trường hợp lệ để cập nhật.");
-
   const names = {};
   const values = {};
   const expressions = entries.map(([field, value], index) => {
@@ -898,16 +1507,8 @@ async function updateItem({ key, updates, condition }) {
     values[valueKey] = value;
     return `${nameKey} = ${valueKey}`;
   });
-
-  return await dynamo.send(new UpdateCommand({
-    TableName: tableName,
-    Key: key,
-    UpdateExpression: `SET ${expressions.join(", ")}`,
-    ExpressionAttributeNames: names,
-    ExpressionAttributeValues: values,
-    ConditionExpression: condition,
-    ReturnValues: "ALL_NEW"
-  }));
+  if (Object.values(names).includes("status")) names["#status"] = "status";
+  return { expression: `SET ${expressions.join(", ")}`, names, values };
 }
 
 function normalizeRequest(event) {
@@ -997,14 +1598,20 @@ function optionalString(value) {
   return String(value).trim();
 }
 
-function optionalAvatarDataUrl(value) {
+function optionalDate(value, fieldName) {
   const text = optionalString(value);
   if (!text) return "";
-  if (text.length > 180000) throw httpError(400, "Ảnh đại diện quá lớn. Vui lòng chọn ảnh nhỏ hơn.");
-  if (!/^data:image\/(png|jpeg|jpg|webp|gif);base64,[A-Za-z0-9+/=]+$/.test(text)) {
-    throw httpError(400, "Ảnh đại diện không đúng định dạng.");
-  }
+  const time = new Date(text).getTime();
+  if (!Number.isFinite(time)) throw httpError(400, `${fieldName} không đúng định dạng ngày.`);
   return text;
+}
+
+function requireFutureDateTime(value, fieldName) {
+  const text = requireString(value, fieldName);
+  const time = new Date(text).getTime();
+  if (!Number.isFinite(time)) throw httpError(400, `${fieldName} không đúng định dạng ngày giờ.`);
+  if (time <= Date.now()) throw httpError(400, "Thời gian lịch hẹn phải ở tương lai.");
+  return new Date(time).toISOString();
 }
 
 function requireEmail(value, fieldName) {
@@ -1050,6 +1657,19 @@ function requireImageContentType(value) {
   return contentType;
 }
 
+function requirePdfContentType(value) {
+  const contentType = optionalString(value).toLowerCase();
+  if (contentType !== "application/pdf") throw httpError(400, "Hợp đồng chỉ chấp nhận tệp PDF.");
+  return contentType;
+}
+
+function requireFileSize(value, maximumBytes, label) {
+  const size = Number(value);
+  if (!Number.isInteger(size) || size <= 0) throw httpError(400, `${label} phải có dung lượng hợp lệ.`);
+  if (size > maximumBytes) throw httpError(400, `${label} vượt quá giới hạn ${Math.round(maximumBytes / 1024 / 1024)} MB.`);
+  return size;
+}
+
 function extensionFromContentType(contentType) {
   if (contentType === "image/png") return "png";
   if (contentType === "image/webp") return "webp";
@@ -1060,6 +1680,22 @@ function readLimit(value, fallback) {
   const limit = Number(value ?? fallback);
   if (!Number.isFinite(limit)) return fallback;
   return Math.min(Math.max(Math.floor(limit), 1), 200);
+}
+
+function encodeNextToken(key) {
+  if (!key) return undefined;
+  return Buffer.from(JSON.stringify(key), "utf8").toString("base64url");
+}
+
+function decodeNextToken(token) {
+  if (!token) return undefined;
+  try {
+    const key = JSON.parse(Buffer.from(String(token), "base64url").toString("utf8"));
+    if (!key || typeof key !== "object" || Array.isArray(key)) throw new Error("invalid");
+    return key;
+  } catch {
+    throw httpError(400, "nextToken không hợp lệ.");
+  }
 }
 
 function pickDefined(record) {
@@ -1085,9 +1721,32 @@ function defaultUserProfile(claims) {
     email: claims.email ?? "",
     displayName: claims.name ?? "",
     phone: "",
+    avatarKey: "",
+    avatarUrl: "",
     avatarDataUrl: "",
     createdAt: undefined,
     updatedAt: undefined
+  };
+}
+
+function defaultUserProfileItem(claims, now) {
+  return {
+    ...userProfileKey(claims.sub),
+    GSI1PK: "ENTITY#USER_PROFILE",
+    GSI1SK: `USER_PROFILE#${now}#${claims.sub}`,
+    GSI2PK: `USER_PROFILE#${claims.sub}`,
+    GSI2SK: "METADATA",
+    entityType: "USER_PROFILE",
+    id: claims.sub,
+    sub: claims.sub,
+    email: claims.email ?? "",
+    displayName: claims.name ?? "",
+    phone: "",
+    avatarKey: "",
+    avatarDataUrl: "",
+    createdAt: now,
+    updatedAt: now,
+    updatedBy: claims.sub
   };
 }
 
@@ -1145,6 +1804,22 @@ function toContract(item) {
   };
 }
 
+function toAppointment(item) {
+  return {
+    id: item.id,
+    officeId: item.officeId,
+    customerName: item.customerName,
+    email: item.email,
+    phone: item.phone,
+    scheduledAt: item.scheduledAt,
+    note: item.note,
+    adminNote: item.adminNote,
+    status: item.status,
+    createdAt: item.createdAt,
+    updatedAt: item.updatedAt
+  };
+}
+
 function toCustomer(item) {
   return {
     id: item.id,
@@ -1164,6 +1839,8 @@ function toUserProfile(item, claims = {}) {
     email: item.email ?? claims.email ?? "",
     displayName: item.displayName ?? claims.name ?? "",
     phone: item.phone ?? "",
+    avatarKey: item.avatarKey ?? "",
+    avatarUrl: "",
     avatarDataUrl: item.avatarDataUrl ?? "",
     createdAt: item.createdAt,
     updatedAt: item.updatedAt
@@ -1189,5 +1866,13 @@ function json(statusCode, body) {
     statusCode,
     headers: corsHeaders,
     body: statusCode === 204 ? "" : JSON.stringify(body)
+  };
+}
+
+function rawResponse(statusCode, body, headers = {}) {
+  return {
+    statusCode,
+    headers: { ...corsHeaders, ...headers },
+    body: String(body ?? "")
   };
 }

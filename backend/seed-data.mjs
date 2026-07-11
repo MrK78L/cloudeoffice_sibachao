@@ -48,7 +48,8 @@ const offices = [
     address: "Etown Central, Tân Bình, TP.HCM",
     areaSqm: 48,
     monthlyPrice: 31000000,
-    status: "AVAILABLE",
+    status: "LEASED",
+    activeContractId: "contract-office-tb-0302-001",
     description: "Không gian gọn, tối ưu chi phí, thuận tiện di chuyển sân bay và trung tâm.",
     imageUrl: "https://images.unsplash.com/photo-1497366216548-37526070297c?auto=format&fit=crop&w=1200&q=80",
     amenities: ["Nội thất cơ bản", "Máy lạnh", "Khu tiếp khách", "Dịch vụ vệ sinh"]
@@ -108,11 +109,26 @@ const contracts = [
   }
 ];
 
+const appointments = [
+  {
+    id: "appointment-office-d1-1201-001",
+    officeId: "office-d1-1201",
+    customerName: "Nguyễn Hoàng Minh",
+    email: "minh.nguyen@example.com",
+    phone: "0901234567",
+    scheduledAt: "2026-08-15T03:00:00.000Z",
+    note: "Muốn xem khu làm việc và phòng họp.",
+    status: "REQUESTED"
+  }
+];
+
 const items = [
   ...offices.map(toOfficeItem),
   ...customers.map(toCustomerItem),
   ...rentalRequests.map(toRentalRequestItem),
-  ...contracts.map(toContractItem)
+  ...contracts.map(toContractItem),
+  ...contracts.filter((contract) => contract.status === "ACTIVE").map(toActiveContractLockItem),
+  ...appointments.map(toAppointmentItem)
 ];
 
 if (args.createTable) {
@@ -162,7 +178,9 @@ async function ensureTable() {
       { AttributeName: "GSI1PK", AttributeType: "S" },
       { AttributeName: "GSI1SK", AttributeType: "S" },
       { AttributeName: "GSI2PK", AttributeType: "S" },
-      { AttributeName: "GSI2SK", AttributeType: "S" }
+      { AttributeName: "GSI2SK", AttributeType: "S" },
+      { AttributeName: "GSI3PK", AttributeType: "S" },
+      { AttributeName: "GSI3SK", AttributeType: "S" }
     ],
     KeySchema: [
       { AttributeName: "PK", KeyType: "HASH" },
@@ -182,6 +200,14 @@ async function ensureTable() {
         KeySchema: [
           { AttributeName: "GSI2PK", KeyType: "HASH" },
           { AttributeName: "GSI2SK", KeyType: "RANGE" }
+        ],
+        Projection: { ProjectionType: "ALL" }
+      },
+      {
+        IndexName: "GSI3",
+        KeySchema: [
+          { AttributeName: "GSI3PK", KeyType: "HASH" },
+          { AttributeName: "GSI3SK", KeyType: "RANGE" }
         ],
         Projection: { ProjectionType: "ALL" }
       }
@@ -214,6 +240,8 @@ function toRentalRequestItem(request) {
     GSI1SK: `REQUEST#${now}#${request.id}`,
     GSI2PK: `REQUEST#${request.id}`,
     GSI2SK: "METADATA",
+    GSI3PK: `CUSTOMER#${request.email.toLowerCase()}`,
+    GSI3SK: `REQUEST#${now}#${request.id}`,
     entityType: "RENTAL_REQUEST",
     createdAt: now,
     updatedAt: now,
@@ -231,12 +259,44 @@ function toContractItem(contract) {
     GSI1SK: `CONTRACT#${now}#${contract.id}`,
     GSI2PK: `CONTRACT#${contract.id}`,
     GSI2SK: "METADATA",
+    GSI3PK: `CUSTOMER#${contract.customerId.toLowerCase()}`,
+    GSI3SK: `CONTRACT#${now}#${contract.id}`,
     entityType: "CONTRACT",
     createdAt: now,
     updatedAt: now,
     createdBy: "seed-data",
     updatedBy: "seed-data",
     ...contract
+  };
+}
+
+function toActiveContractLockItem(contract) {
+  return {
+    PK: `OFFICE#${contract.officeId}`,
+    SK: "ACTIVE_CONTRACT",
+    entityType: "ACTIVE_CONTRACT_LOCK",
+    officeId: contract.officeId,
+    contractId: contract.id,
+    createdAt: now
+  };
+}
+
+function toAppointmentItem(appointment) {
+  return {
+    PK: `OFFICE#${appointment.officeId}`,
+    SK: `APPOINTMENT#${appointment.id}`,
+    GSI1PK: "ENTITY#APPOINTMENT",
+    GSI1SK: `APPOINTMENT#${appointment.scheduledAt}#${appointment.id}`,
+    GSI2PK: `APPOINTMENT#${appointment.id}`,
+    GSI2SK: "METADATA",
+    GSI3PK: `CUSTOMER#${appointment.email.toLowerCase()}`,
+    GSI3SK: `APPOINTMENT#${appointment.scheduledAt}#${appointment.id}`,
+    entityType: "APPOINTMENT",
+    createdAt: now,
+    updatedAt: now,
+    createdBy: appointment.email,
+    updatedBy: appointment.email,
+    ...appointment
   };
 }
 

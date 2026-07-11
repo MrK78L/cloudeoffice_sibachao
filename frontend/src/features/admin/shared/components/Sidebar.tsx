@@ -1,11 +1,12 @@
 import { navigate } from "../../../../app/router";
 
 const items = [
-  { path: "/admin", label: "Dashboard", icon: "01" },
-  { path: "/admin/offices", label: "Văn phòng", icon: "02" },
-  { path: "/admin/requests", label: "Yêu cầu thuê", icon: "03" },
-  { path: "/admin/contracts", label: "Hợp đồng", icon: "04" },
-  { path: "/admin/customers", label: "Khách hàng", icon: "05" }
+  { path: "/admin", label: "Tổng quan", icon: "DB" },
+  { path: "/admin/offices", label: "Văn phòng", icon: "VP" },
+  { path: "/admin/requests", label: "Yêu cầu thuê", icon: "YC" },
+  { path: "/admin/appointments", label: "Lịch hẹn", icon: "LH" },
+  { path: "/admin/contracts", label: "Hợp đồng", icon: "HĐ" },
+  { path: "/admin/customers", label: "Khách hàng", icon: "KH" }
 ];
 
 export function Sidebar({ activePath }: { activePath: string }) {
@@ -13,7 +14,10 @@ export function Sidebar({ activePath }: { activePath: string }) {
     <aside className="admin-sidebar">
       <div className="admin-brand">
         <span>CO</span>
-        <strong>Cloud Office</strong>
+        <div>
+          <strong>Cloud Office</strong>
+          <small>Management</small>
+        </div>
       </div>
       <nav>
         {items.map((item) => (

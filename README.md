@@ -309,6 +309,14 @@ Huong dan day du tu A den Z nam tai:
 
 [docs/00-huong-dan-chay-va-deploy-tu-a-den-z.md](docs/00-huong-dan-chay-va-deploy-tu-a-den-z.md)
 
+Tong hop cac chuc nang backend moi, migration DynamoDB, lich hen, upload S3, canh bao hop dong va WAF tuy chon:
+
+[docs/11-tong-hop-trien-khai-chuc-nang-backend.md](docs/11-tong-hop-trien-khai-chuc-nang-backend.md)
+
+Huong dan deploy AWS theo tung giai doan, CloudFront va WAF tuy chon:
+
+[docs/12-huong-dan-deploy-du-an-aws.md](docs/12-huong-dan-deploy-du-an-aws.md)
+
 Nen doc file nay khi can deploy that, xu ly loi CORS, Cognito, CloudFront, seed DynamoDB hoac upload hinh anh len S3.
 
 ## Trang thai khuyen nghi khi phat trien
