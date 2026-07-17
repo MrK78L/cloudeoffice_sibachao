@@ -68,9 +68,6 @@ export type OfficePayload = {
   status: Office["status"];
   description?: string;
   imageUrl?: string;
-  imageKey?: string;
-  processedImageKey?: string;
-  processedImageReady?: boolean;
   amenities?: string[];
 };
 
@@ -115,27 +112,42 @@ export async function getAdminStats() {
 
 export async function getAdminOffices() {
   if (isAdminPreviewMode) return { items: getPreviewOffices(), count: getPreviewOffices().length };
-  return apiRequest<{ items: Office[]; count: number }>("/admin/offices", { auth: true });
+  return getAllAdminItems<Office>("/admin/offices");
 }
 
 export async function getAdminRentalRequests() {
   if (isAdminPreviewMode) return { items: getPreviewRentalRequests(), count: getPreviewRentalRequests().length };
-  return apiRequest<{ items: RentalRequest[]; count: number }>("/admin/rental-requests", { auth: true });
+  return getAllAdminItems<RentalRequest>("/admin/rental-requests");
 }
 
 export async function getAdminContracts() {
   if (isAdminPreviewMode) return { items: getPreviewContracts(), count: getPreviewContracts().length };
-  return apiRequest<{ items: Contract[]; count: number }>("/admin/contracts", { auth: true });
+  return getAllAdminItems<Contract>("/admin/contracts");
 }
 
 export async function getAdminCustomers() {
   if (isAdminPreviewMode) return { items: getPreviewCustomers(), count: getPreviewCustomers().length };
-  return apiRequest<{ items: Customer[]; count: number }>("/admin/customers", { auth: true });
+  return getAllAdminItems<Customer>("/admin/customers");
 }
 
 export async function getAdminAppointments() {
   if (isAdminPreviewMode) return { items: getPreviewAppointments(), count: getPreviewAppointments().length };
-  return apiRequest<{ items: Appointment[]; count: number }>("/admin/appointments", { auth: true });
+  return getAllAdminItems<Appointment>("/admin/appointments");
+}
+
+async function getAllAdminItems<T>(path: string) {
+  const items: T[] = [];
+  let nextToken: string | undefined;
+  let pageCount = 0;
+  do {
+    const query = new URLSearchParams({ limit: "200" });
+    if (nextToken) query.set("nextToken", nextToken);
+    const response = await apiRequest<{ items: T[]; nextToken?: string }>(`${path}?${query}`, { auth: true });
+    items.push(...response.items);
+    nextToken = response.nextToken;
+    pageCount += 1;
+  } while (nextToken && pageCount < 20);
+  return { items, count: items.length, nextToken };
 }
 
 export async function updateAdminAppointment(id: string, payload: Pick<Appointment, "status"> & { adminNote?: string }) {
@@ -218,6 +230,19 @@ export async function uploadOfficeImageToS3(uploadUrl: string, file: File) {
   if (!response.ok) {
     throw new Error("Không thể tải ảnh văn phòng lên hệ thống. Vui lòng thử lại.");
   }
+}
+
+export async function confirmAdminOfficeImage(id: string, key: string) {
+  if (isAdminPreviewMode) {
+    const item = getPreviewOffices().find((office) => office.id === id);
+    if (!item) throw new Error("Không tìm thấy văn phòng.");
+    return { item };
+  }
+  return apiRequest<{ item: Office }>(`/admin/offices/${encodeURIComponent(id)}/image`, {
+    method: "POST",
+    body: { key },
+    auth: true
+  });
 }
 
 export async function createAdminRentalRequest(payload: RentalRequestPayload) {

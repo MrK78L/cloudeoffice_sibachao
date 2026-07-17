@@ -19,4 +19,5 @@ export type Office = {
 export type OfficeSearchParams = {
   q?: string;
   status?: Office["status"];
+  nextToken?: string;
 };

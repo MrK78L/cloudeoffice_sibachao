@@ -1,5 +1,6 @@
-import { createContext, ReactNode, useMemo, useState } from "react";
+import { createContext, ReactNode, useEffect, useMemo, useState } from "react";
 import {
+  authSessionChangedEvent,
   getAuthSession,
   getUserFromSession,
   logout as clearSession,
@@ -23,6 +24,12 @@ export const AuthContext = createContext<AuthContextValue | null>(null);
 
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [session, setSession] = useState<AuthSession | null>(() => getAuthSession());
+
+  useEffect(() => {
+    const syncSession = () => setSession(getAuthSession());
+    window.addEventListener(authSessionChangedEvent, syncSession);
+    return () => window.removeEventListener(authSessionChangedEvent, syncSession);
+  }, []);
 
   const value = useMemo<AuthContextValue>(() => {
     const user = getUserFromSession(session);

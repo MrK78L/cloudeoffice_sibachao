@@ -22,9 +22,17 @@ Parameters:
     Type: String
     Default: ""
     Description: Optional CLOUDFRONT-scope WAFv2 Web ACL ARN created in us-east-1.
+  EnablePointInTimeRecovery:
+    Type: String
+    Default: "false"
+    AllowedValues:
+      - "true"
+      - "false"
+    Description: Enable paid DynamoDB point-in-time recovery for production data.
 
 Conditions:
   CreateCloudFront: !Equals [!Ref EnableCloudFront, "true"]
+  EnableDynamoPointInTimeRecovery: !Equals [!Ref EnablePointInTimeRecovery, "true"]
   AttachCloudFrontWaf: !And
     - !Condition CreateCloudFront
     - !Not [!Equals [!Ref CloudFrontWebAclArn, ""]]
@@ -58,6 +66,10 @@ Resources:
     Type: AWS::S3::Bucket
     Properties:
       BucketName: !Sub "${ProjectName}-frontend-${AWS::AccountId}-${AWS::Region}"
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
       PublicAccessBlockConfiguration:
         BlockPublicAcls: true
         BlockPublicPolicy: true
@@ -68,6 +80,10 @@ Resources:
     Type: AWS::S3::Bucket
     Properties:
       BucketName: !Sub "${ProjectName}-storage-${AWS::AccountId}-${AWS::Region}"
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
       CorsConfiguration:
         CorsRules:
           - AllowedOrigins:
@@ -90,11 +106,17 @@ Resources:
             Status: Enabled
             Prefix: uploads/
             ExpirationInDays: 1
+            AbortIncompleteMultipartUpload:
+              DaysAfterInitiation: 1
 
   ProcessedBucket:
     Type: AWS::S3::Bucket
     Properties:
       BucketName: !Sub "${ProjectName}-processed-${AWS::AccountId}-${AWS::Region}"
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
       PublicAccessBlockConfiguration:
         BlockPublicAcls: true
         BlockPublicPolicy: true
@@ -106,6 +128,10 @@ Resources:
     Properties:
       TableName: !Sub "${ProjectName}-offices-table"
       BillingMode: PAY_PER_REQUEST
+      SSESpecification:
+        SSEEnabled: true
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: !If [EnableDynamoPointInTimeRecovery, true, false]
       AttributeDefinitions:
         - AttributeName: PK
           AttributeType: S
@@ -175,6 +201,7 @@ Resources:
       ClientName: !Sub "${ProjectName}-web-client"
       UserPoolId: !Ref UserPool
       GenerateSecret: false
+      PreventUserExistenceErrors: ENABLED
       ExplicitAuthFlows:
         - ALLOW_USER_PASSWORD_AUTH
         - ALLOW_REFRESH_TOKEN_AUTH
@@ -392,6 +419,14 @@ Resources:
             Method: ANY
             Auth:
               Authorizer: CognitoJwtAuthorizer
+        ConfirmOfficeImage:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref HttpApi
+            Path: /admin/offices/{id}/image
+            Method: POST
+            Auth:
+              Authorizer: CognitoJwtAuthorizer
 
   ImageProcessorFunction:
     Type: AWS::Serverless::Function
@@ -449,7 +484,7 @@ Resources:
           ALERT_TOPIC_ARN: !Ref AlertsTopic
           EXPIRY_WARNING_DAYS: "30"
       Policies:
-        - DynamoDBReadPolicy:
+        - DynamoDBCrudPolicy:
             TableName: !Ref OfficesTable
         - SNSPublishMessagePolicy:
             TopicName: !GetAtt AlertsTopic.TopicName
@@ -460,6 +495,24 @@ Resources:
             ScheduleExpression: cron(0 1 * * ? *)
             Description: Check active contracts expiring within 30 days.
             State: ENABLED
+
+  BusinessLogicLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/${ProjectName}-business-logic"
+      RetentionInDays: 14
+
+  ImageProcessorLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/${ProjectName}-image-processor"
+      RetentionInDays: 14
+
+  ContractExpiryNotifierLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/${ProjectName}-contract-expiry-notifier"
+      RetentionInDays: 14
 
   BusinessLogicErrorAlarm:
     Type: AWS::CloudWatch::Alarm

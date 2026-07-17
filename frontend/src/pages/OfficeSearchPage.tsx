@@ -9,7 +9,7 @@ export function OfficeSearchPage() {
     ? statusParam as Office["status"]
     : "ALL";
   const { input, setInput, query, status, setStatus, submit, clear } = useOfficeSearch(initialQuery, initialStatus);
-  const { items, isLoading, error } = useOffices({ q: query, status: status === "ALL" ? undefined : status });
+  const { items, isLoading, isLoadingMore, hasMore, loadMore, error } = useOffices({ q: query, status: status === "ALL" ? undefined : status });
   const [selectedOfficeId, setSelectedOfficeId] = useState("");
 
   const selectedOffice = useMemo(
@@ -48,6 +48,11 @@ export function OfficeSearchPage() {
         <div aria-busy={isLoading}>
           {isLoading && <div className="skeleton-stack"><span /><span /><span /></div>}
           <OfficeList offices={items} selectedOfficeId={selectedOffice?.id} onSelect={handleSelect} />
+          {hasMore && (
+            <button className="secondary" disabled={isLoadingMore} onClick={() => void loadMore()} type="button">
+              {isLoadingMore ? "Đang tải..." : "Xem thêm văn phòng"}
+            </button>
+          )}
           {!isLoading && !error && items.length === 0 && (
             <div className="empty-state search-empty-state">
               <strong>Chưa tìm thấy văn phòng phù hợp</strong>

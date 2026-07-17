@@ -69,7 +69,7 @@ Can cai truoc:
 - npm
 - AWS CLI v2
 - AWS SAM CLI
-- Docker Desktop neu muon test local Lambda/SAM day du
+- Docker Desktop dang chay de build Lambda dung thu vien native Linux (dac biet `sharp`)
 - Tai khoan AWS da cau hinh quyen cho CloudFormation, Lambda, API Gateway, DynamoDB, S3, Cognito, IAM, CloudWatch, SNS va CloudFront
 
 Kiem tra phien ban:
@@ -162,7 +162,7 @@ http://localhost:5173
 cd D:\THUCTAPTT\cloudoffice\backend
 
 # Build SAM template va Lambda artifacts
-sam build --config-file samconfig.toml --no-cached
+sam build --use-container --config-file samconfig.toml --no-cached
 ```
 
 ## Deploy backend len AWS
@@ -191,7 +191,7 @@ Neu da co `samconfig.toml`:
 
 ```powershell
 cd D:\THUCTAPTT\cloudoffice\backend
-sam build --config-file samconfig.toml --no-cached
+sam build --use-container --config-file samconfig.toml --no-cached
 sam deploy --config-file samconfig.toml --template-file .aws-sam/build/template.yaml
 ```
 

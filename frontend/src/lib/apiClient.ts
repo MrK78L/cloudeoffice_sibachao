@@ -1,4 +1,4 @@
-import { getAccessToken, logout } from "../features/auth/cognito";
+import { getValidAccessToken, logout } from "../features/auth/cognito";
 import { toFriendlyApiError, toFriendlyNetworkError } from "./friendlyErrors";
 
 const apiBaseUrl = import.meta.env.VITE_API_BASE_URL ?? "";
@@ -14,11 +14,11 @@ export async function apiRequest<T>(path: string, options: ApiRequestOptions = {
     throw new Error("Hệ thống chưa sẵn sàng. Vui lòng thử lại sau.");
   }
 
-  const token = options.auth ? getAccessToken() : undefined;
+  const token = options.auth ? await getValidAccessToken() : undefined;
   let response: Response;
 
   try {
-    response = await fetch(`${apiBaseUrl}${path}`, {
+    response = await fetchWithTimeout(`${apiBaseUrl}${path}`, {
       method: options.method ?? "GET",
       headers: {
         "Content-Type": "application/json",
@@ -44,10 +44,15 @@ export async function apiRequest<T>(path: string, options: ApiRequestOptions = {
 }
 
 export async function apiDownload(path: string, fileName: string) {
-  const token = getAccessToken();
-  const response = await fetch(`${apiBaseUrl}${path}`, {
-    headers: token ? { Authorization: `Bearer ${token}` } : {}
-  });
+  const token = await getValidAccessToken();
+  let response: Response;
+  try {
+    response = await fetchWithTimeout(`${apiBaseUrl}${path}`, {
+      headers: token ? { Authorization: `Bearer ${token}` } : {}
+    });
+  } catch (error) {
+    throw new Error(toFriendlyNetworkError(error));
+  }
   if (!response.ok) {
     const payload = await response.json().catch(() => ({}));
     throw new Error(toFriendlyApiError(response.status, payload));
@@ -58,4 +63,14 @@ export async function apiDownload(path: string, fileName: string) {
   anchor.download = fileName;
   anchor.click();
   URL.revokeObjectURL(url);
+}
+
+async function fetchWithTimeout(input: RequestInfo | URL, init: RequestInit = {}) {
+  const controller = new AbortController();
+  const timeout = window.setTimeout(() => controller.abort(), 25_000);
+  try {
+    return await fetch(input, { ...init, signal: controller.signal });
+  } finally {
+    window.clearTimeout(timeout);
+  }
 }

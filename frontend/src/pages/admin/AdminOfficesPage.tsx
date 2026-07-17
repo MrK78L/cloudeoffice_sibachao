@@ -2,6 +2,7 @@ import { ChangeEvent, FormEvent, useEffect, useState } from "react";
 import {
   createAdminOffice,
   createAdminOfficeImageUploadUrl,
+  confirmAdminOfficeImage,
   deleteAdminOffice,
   getAdminOffices,
   type OfficePayload,
@@ -121,12 +122,7 @@ export function AdminOfficesPage() {
   const uploadAndAttachImage = async (officeId: string, file: File) => {
     const upload = await createAdminOfficeImageUploadUrl(officeId, file);
     await uploadOfficeImageToS3(upload.uploadUrl, file);
-    await updateAdminOffice(officeId, {
-      imageKey: upload.key,
-      processedImageKey: "",
-      processedImageReady: false,
-      imageUrl: ""
-    });
+    await confirmAdminOfficeImage(officeId, upload.key);
   };
 
   const handleSubmit = async (event: FormEvent) => {

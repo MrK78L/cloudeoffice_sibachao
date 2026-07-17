@@ -2,8 +2,10 @@ import { FormEvent, useState } from "react";
 import { navigate } from "../../../app/router";
 import { toFriendlyMessage } from "../../../lib/friendlyErrors";
 import {
+  completeNewPasswordChallenge,
   confirmPasswordReset,
   confirmSignUp,
+  NewPasswordRequiredError,
   requestPasswordReset,
   signInWithEmailPassword,
   signUpWithEmailPassword
@@ -14,7 +16,7 @@ type LoginFormProps = {
   reason?: string;
 };
 
-type AuthMode = "login" | "register" | "confirm" | "forgot" | "reset";
+type AuthMode = "login" | "register" | "confirm" | "forgot" | "reset" | "new-password";
 
 export function LoginForm({ reason }: LoginFormProps) {
   const { loginWithSession } = useAuth();
@@ -24,6 +26,7 @@ export function LoginForm({ reason }: LoginFormProps) {
   const [password, setPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
   const [code, setCode] = useState("");
+  const [challengeSession, setChallengeSession] = useState("");
   const [error, setError] = useState("");
   const [success, setSuccess] = useState("");
   const [isSubmitting, setIsSubmitting] = useState(false);
@@ -37,6 +40,15 @@ export function LoginForm({ reason }: LoginFormProps) {
     try {
       if (mode === "login") {
         const session = await signInWithEmailPassword({ email, password });
+        loginWithSession(session);
+        navigate("/");
+        return;
+      }
+
+      if (mode === "new-password") {
+        validatePasswordMatch();
+        if (!challengeSession) throw new Error("Phiên đổi mật khẩu không còn hợp lệ. Vui lòng đăng nhập lại.");
+        const session = await completeNewPasswordChallenge(email, password, challengeSession);
         loginWithSession(session);
         navigate("/");
         return;
@@ -71,6 +83,14 @@ export function LoginForm({ reason }: LoginFormProps) {
         setMode("login");
       }
     } catch (caught) {
+      if (caught instanceof NewPasswordRequiredError) {
+        setChallengeSession(caught.challengeSession);
+        setPassword("");
+        setConfirmPassword("");
+        setSuccess("Đây là lần đăng nhập đầu tiên. Vui lòng tạo mật khẩu mới.");
+        setMode("new-password");
+        return;
+      }
       setError(toFriendlyMessage(caught, "Không thể xử lý yêu cầu. Vui lòng thử lại."));
     } finally {
       setIsSubmitting(false);
@@ -83,6 +103,7 @@ export function LoginForm({ reason }: LoginFormProps) {
     setSuccess("");
     setCode("");
     setConfirmPassword("");
+    if (nextMode !== "new-password") setChallengeSession("");
   }
 
   function validatePasswordMatch() {
@@ -96,7 +117,8 @@ export function LoginForm({ reason }: LoginFormProps) {
     register: "Tạo tài khoản",
     confirm: "Xác nhận email",
     forgot: "Quên mật khẩu",
-    reset: "Đặt lại mật khẩu"
+    reset: "Đặt lại mật khẩu",
+    "new-password": "Tạo mật khẩu mới"
   }[mode];
 
   const description = {
@@ -104,7 +126,8 @@ export function LoginForm({ reason }: LoginFormProps) {
     register: "Tạo tài khoản khách hàng để lưu thông tin và nhận cập nhật về yêu cầu thuê.",
     confirm: "Nhập mã xác nhận đã được gửi về email để kích hoạt tài khoản.",
     forgot: "Nhập email tài khoản để nhận mã đặt lại mật khẩu.",
-    reset: "Nhập mã xác nhận và mật khẩu mới để hoàn tất khôi phục."
+    reset: "Nhập mã xác nhận và mật khẩu mới để hoàn tất khôi phục.",
+    "new-password": "Tạo mật khẩu mới cho lần đăng nhập đầu tiên để tiếp tục sử dụng tài khoản."
   }[mode];
 
   return (
@@ -128,7 +151,7 @@ export function LoginForm({ reason }: LoginFormProps) {
         </div>
 
         <div className="auth-tabs" aria-label="Chọn chức năng tài khoản">
-          <button className={mode === "login" ? "active" : ""} onClick={() => changeMode("login")} type="button">
+          <button className={mode === "login" || mode === "new-password" ? "active" : ""} onClick={() => changeMode("login")} type="button">
             Đăng nhập
           </button>
           <button className={mode === "register" || mode === "confirm" ? "active" : ""} onClick={() => changeMode("register")} type="button">
@@ -167,7 +190,7 @@ export function LoginForm({ reason }: LoginFormProps) {
           />
         </label>
 
-        {(mode === "login" || mode === "register" || mode === "reset") && (
+        {(mode === "login" || mode === "register" || mode === "reset" || mode === "new-password") && (
           <label>
             Mật khẩu
             <input
@@ -182,7 +205,7 @@ export function LoginForm({ reason }: LoginFormProps) {
           </label>
         )}
 
-        {(mode === "register" || mode === "reset") && (
+        {(mode === "register" || mode === "reset" || mode === "new-password") && (
           <label>
             Nhập lại mật khẩu
             <input

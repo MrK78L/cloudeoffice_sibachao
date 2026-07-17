@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { canTransitionRentalRequest, contractEndTimestamp, stableHash } from "./domain.mjs";
 import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
 import {
   DynamoDBDocumentClient,
@@ -191,6 +192,9 @@ async function dispatchAdmin(request) {
   if (method === "POST" && /^\/admin\/offices\/[^/]+\/image-upload-url$/.test(path)) {
     return ok(await createOfficeImageUploadUrl(request, pathParam(path, 2)));
   }
+  if (method === "POST" && /^\/admin\/offices\/[^/]+\/image$/.test(path)) {
+    return ok(await confirmOfficeImageUpload(request, pathParam(path, 2)));
+  }
 
   if (method === "GET" && path === "/admin/rental-requests") return ok(await listRentalRequests(request));
   if (method === "POST" && path === "/admin/rental-requests") return created(await createRentalRequest(request));
@@ -240,13 +244,17 @@ async function dispatchAdmin(request) {
 async function listOffices(request, options = {}) {
   const query = request.query.q?.toLowerCase();
   const status = request.query.status;
-  const result = await queryEntity("OFFICE", readLimit(request.query.limit, 50), request.query.nextToken);
-  let items = (result.Items ?? []).map(toOffice);
-
-  if (!options.includeInactive) items = items.filter((office) => office.status !== "INACTIVE");
-  if (status) items = items.filter((office) => office.status === status);
-  if (query) items = items.filter((office) => `${office.title} ${office.address}`.toLowerCase().includes(query));
-  items = await hydrateOfficeImageUrls(items);
+  const result = await queryFilteredEntity(
+    "OFFICE",
+    readLimit(request.query.limit, 50),
+    request.query.nextToken,
+    (office) => (
+      (options.includeInactive || office.status !== "INACTIVE") &&
+      (!status || office.status === status) &&
+      (!query || `${office.title} ${office.address}`.toLowerCase().includes(query))
+    )
+  );
+  const items = await hydrateOfficeImageUrls((result.Items ?? []).map(toOffice));
 
   return { items, count: items.length, nextToken: encodeNextToken(result.LastEvaluatedKey) };
 }
@@ -276,13 +284,10 @@ async function createOffice(request) {
     address: requireString(body.address, "address"),
     areaSqm: requirePositiveNumber(body.areaSqm, "areaSqm"),
     monthlyPrice: requirePositiveNumber(body.monthlyPrice, "monthlyPrice"),
-    status: requireEnum(body.status ?? "AVAILABLE", officeStatuses, "status"),
-    description: optionalString(body.description),
-    imageUrl: optionalString(body.imageUrl),
-    imageKey: optionalString(body.imageKey),
-    processedImageKey: optionalString(body.processedImageKey),
-    processedImageReady: Boolean(body.processedImageReady),
-    amenities: body.amenities === undefined ? [] : requireStringArray(body.amenities, "amenities"),
+      status: requireEnum(body.status ?? "AVAILABLE", officeStatuses, "status"),
+      description: optionalString(body.description),
+      imageUrl: optionalString(body.imageUrl),
+      amenities: body.amenities === undefined ? [] : requireStringArray(body.amenities, "amenities"),
     createdAt: now,
     updatedAt: now,
     createdBy: request.claims.sub ?? "unknown",
@@ -301,36 +306,41 @@ async function createOffice(request) {
 async function updateOffice(request, id) {
   const body = parseBody(request.event);
   const now = new Date().toISOString();
-  const result = await updateItem({
-    key: officeKey(id),
-    updates: pickDefined({
-      title: body.title === undefined ? undefined : requireString(body.title, "title"),
+  const current = await dynamo.send(new GetCommand({ TableName: tableName, Key: officeKey(id) }));
+  if (!current.Item) throw httpError(404, "Không tìm thấy văn phòng.");
+  if (body.status !== undefined) {
+    const nextStatus = requireEnum(body.status, officeStatuses, "status");
+    await assertOfficeStatusUpdateAllowed(current.Item, nextStatus);
+  }
+    const result = await updateEntityWithOptionalLockDelete(
+      current.Item,
+      pickDefined({
+        title: body.title === undefined ? undefined : requireString(body.title, "title"),
       address: body.address === undefined ? undefined : requireString(body.address, "address"),
       areaSqm: body.areaSqm === undefined ? undefined : requirePositiveNumber(body.areaSqm, "areaSqm"),
       monthlyPrice: body.monthlyPrice === undefined ? undefined : requirePositiveNumber(body.monthlyPrice, "monthlyPrice"),
-      status: body.status === undefined ? undefined : requireEnum(body.status, officeStatuses, "status"),
-      description: body.description === undefined ? undefined : optionalString(body.description),
-      imageUrl: body.imageUrl === undefined ? undefined : optionalString(body.imageUrl),
-      imageKey: body.imageKey === undefined ? undefined : optionalString(body.imageKey),
-      processedImageKey: body.processedImageKey === undefined ? undefined : optionalString(body.processedImageKey),
-      processedImageReady: body.processedImageReady === undefined ? undefined : Boolean(body.processedImageReady),
-      amenities: body.amenities === undefined ? undefined : requireStringArray(body.amenities, "amenities"),
-      updatedAt: now,
-      updatedBy: request.claims.sub ?? "unknown"
-    }),
-    condition: "attribute_exists(PK) AND attribute_exists(SK)"
-  });
+        status: body.status === undefined ? undefined : requireEnum(body.status, officeStatuses, "status"),
+        description: body.description === undefined ? undefined : optionalString(body.description),
+        imageUrl: body.imageUrl === undefined ? undefined : optionalString(body.imageUrl),
+        amenities: body.amenities === undefined ? undefined : requireStringArray(body.amenities, "amenities"),
+        updatedAt: now,
+        updatedBy: request.claims.sub ?? "unknown"
+      }),
+      null,
+      "Văn phòng vừa được cập nhật bởi một thao tác khác. Vui lòng tải lại dữ liệu."
+    );
   return { item: await hydrateOfficeImageUrl(toOffice(result.Attributes)) };
 }
 
-async function deleteOffice(request, id) {
-  await assertOfficeCanBeDeleted(id);
-  const now = new Date().toISOString();
-  const result = await updateItem({
-    key: officeKey(id),
-    updates: { status: "INACTIVE", deletedAt: now, deletedBy: request.claims.sub ?? "unknown", updatedAt: now, updatedBy: request.claims.sub ?? "unknown" },
-    condition: "attribute_exists(PK) AND attribute_exists(SK)"
-  });
+  async function deleteOffice(request, id) {
+    const current = await assertOfficeCanBeDeleted(id);
+    const now = new Date().toISOString();
+    const result = await updateEntityWithOptionalLockDelete(
+      current,
+      { status: "INACTIVE", deletedAt: now, deletedBy: request.claims.sub ?? "unknown", updatedAt: now, updatedBy: request.claims.sub ?? "unknown" },
+      null,
+      "Văn phòng vừa thay đổi trạng thái. Vui lòng tải lại dữ liệu trước khi xóa."
+    );
   return { item: await hydrateOfficeImageUrl(toOffice(result.Attributes)) };
 }
 
@@ -358,6 +368,56 @@ async function createOfficeImageUploadUrl(request, officeId) {
   };
 }
 
+async function confirmOfficeImageUpload(request, officeId) {
+  const body = parseBody(request.event);
+  const key = requireString(body.key, "key");
+  const expectedPrefix = `images/offices/${officeId}/`;
+  if (!key.startsWith(expectedPrefix)) {
+    throw httpError(400, "Đường dẫn ảnh văn phòng không hợp lệ.");
+  }
+
+  await assertS3ImageObject(storageBucketName, key, maxOfficeImageBytes, "Ảnh văn phòng");
+  const current = await dynamo.send(new GetCommand({ TableName: tableName, Key: officeKey(officeId) }));
+  if (!current.Item) throw httpError(404, "Không tìm thấy văn phòng.");
+
+  const processedImageKey = key.replace(/\.[^.]+$/, ".webp");
+  let processedImageReady = false;
+  try {
+    await s3.send(new HeadObjectCommand({ Bucket: processedBucketName, Key: processedImageKey }));
+    processedImageReady = true;
+  } catch {
+    // The S3 event processor may still be running. It will mark the item ready later.
+  }
+
+  const now = new Date().toISOString();
+  const result = await updateItem({
+    key: officeKey(officeId),
+    updates: {
+      imageUrl: "",
+      imageKey: key,
+      processedImageKey: processedImageReady ? processedImageKey : "",
+      processedImageReady,
+      updatedAt: now,
+      updatedBy: request.claims.sub ?? "admin"
+    },
+    condition: "attribute_exists(PK) AND attribute_exists(SK)"
+  });
+
+  await deleteReplacedOfficeImages(current.Item, key, processedImageKey);
+  return { item: await hydrateOfficeImageUrl(toOffice(result.Attributes)) };
+}
+
+async function deleteReplacedOfficeImages(previousOffice, currentImageKey, currentProcessedKey) {
+  const deletes = [];
+  if (previousOffice.imageKey && previousOffice.imageKey !== currentImageKey) {
+    deletes.push(s3.send(new DeleteObjectCommand({ Bucket: storageBucketName, Key: previousOffice.imageKey })));
+  }
+  if (previousOffice.processedImageKey && previousOffice.processedImageKey !== currentProcessedKey) {
+    deletes.push(s3.send(new DeleteObjectCommand({ Bucket: processedBucketName, Key: previousOffice.processedImageKey })));
+  }
+  await Promise.all(deletes.map((operation) => operation.catch(() => undefined)));
+}
+
 async function createRentalRequest(request) {
   const body = parseBody(request.event);
   const now = new Date().toISOString();
@@ -370,7 +430,7 @@ async function createRentalRequest(request) {
     throw httpError(403, "Email yêu cầu thuê phải trùng với email tài khoản đang đăng nhập.");
   }
 
-  await assertOfficeExists(officeId);
+  await assertOfficeAcceptsRequests(officeId);
   await assertNoOpenRentalRequest(officeId, email);
   await upsertCustomerFromRequest({ request, email, customerName, phone: body.phone, now });
 
@@ -397,7 +457,7 @@ async function createRentalRequest(request) {
     updatedBy: request.claims.sub ?? email
   };
 
-  await dynamo.send(new PutCommand({ TableName: tableName, Item: item }));
+  await createRentalRequestWithLock(item);
   return { item: toRentalRequest(item) };
 }
 
@@ -416,10 +476,14 @@ async function getRentalRequestById(id) {
 }
 
 async function listRentalRequests(request) {
-  const result = await queryEntity("RENTAL_REQUEST", readLimit(request.query.limit, 100), request.query.nextToken);
-  let items = (result.Items ?? []).map(toRentalRequest);
-  if (request.query.status) items = items.filter((item) => item.status === request.query.status);
-  if (request.query.officeId) items = items.filter((item) => item.officeId === request.query.officeId);
+  const result = await queryFilteredEntity(
+    "RENTAL_REQUEST",
+    readLimit(request.query.limit, 100),
+    request.query.nextToken,
+    (item) => (!request.query.status || item.status === request.query.status) &&
+      (!request.query.officeId || item.officeId === request.query.officeId)
+  );
+  const items = (result.Items ?? []).map(toRentalRequest);
   return { items, count: items.length, nextToken: encodeNextToken(result.LastEvaluatedKey) };
 }
 
@@ -431,29 +495,25 @@ async function listCurrentUserRentalRequests(request) {
 async function updateRentalRequestStatus(request, id) {
   const body = parseBody(request.event);
   const current = await getRawByGsi2(`REQUEST#${id}`, "Không tìm thấy yêu cầu thuê.");
-  const now = new Date().toISOString();
-  const result = await updateItem({
-    key: { PK: current.PK, SK: current.SK },
-    updates: {
-      status: requireEnum(body.status, rentalRequestStatuses, "status"),
-      decisionNote: optionalString(body.decisionNote),
-      updatedAt: now,
-      updatedBy: request.claims.sub ?? "admin"
-    },
-    condition: "attribute_exists(PK) AND attribute_exists(SK)"
-  });
+  const nextStatus = requireEnum(body.status, rentalRequestStatuses, "status");
+  assertRentalRequestTransition(current.status, nextStatus);
+  const result = await updateRentalRequestWithLock(current, {
+    status: nextStatus,
+    decisionNote: optionalString(body.decisionNote),
+    updatedAt: new Date().toISOString(),
+    updatedBy: request.claims.sub ?? "admin"
+  }, !blockingRentalRequestStatuses.has(nextStatus));
   return { item: toRentalRequest(result.Attributes) };
 }
 
 async function cancelRentalRequest(request, id) {
   const current = await getRawByGsi2(`REQUEST#${id}`, "Không tìm thấy yêu cầu thuê.");
   await assertRentalRequestCanBeDeleted(current);
-  const now = new Date().toISOString();
-  const result = await updateItem({
-    key: { PK: current.PK, SK: current.SK },
-    updates: { status: "CANCELLED", updatedAt: now, updatedBy: request.claims.sub ?? "admin" },
-    condition: "attribute_exists(PK) AND attribute_exists(SK)"
-  });
+  const result = await updateRentalRequestWithLock(current, {
+    status: "CANCELLED",
+    updatedAt: new Date().toISOString(),
+    updatedBy: request.claims.sub ?? "admin"
+  }, true);
   return { item: toRentalRequest(result.Attributes) };
 }
 
@@ -495,19 +555,19 @@ async function createAppointment(request) {
     createdBy: request.claims.sub ?? email,
     updatedBy: request.claims.sub ?? email
   };
-  await dynamo.send(new PutCommand({
-    TableName: tableName,
-    Item: item,
-    ConditionExpression: "attribute_not_exists(PK) AND attribute_not_exists(SK)"
-  }));
+  await createAppointmentWithLock(item);
   return { item: toAppointment(item) };
 }
 
 async function listAppointments(request) {
-  const result = await queryEntity("APPOINTMENT", readLimit(request.query.limit, 100), request.query.nextToken);
-  let items = (result.Items ?? []).map(toAppointment);
-  if (request.query.status) items = items.filter((item) => item.status === request.query.status);
-  if (request.query.officeId) items = items.filter((item) => item.officeId === request.query.officeId);
+  const result = await queryFilteredEntity(
+    "APPOINTMENT",
+    readLimit(request.query.limit, 100),
+    request.query.nextToken,
+    (item) => (!request.query.status || item.status === request.query.status) &&
+      (!request.query.officeId || item.officeId === request.query.officeId)
+  );
+  const items = (result.Items ?? []).map(toAppointment);
   return { items, count: items.length, nextToken: encodeNextToken(result.LastEvaluatedKey) };
 }
 
@@ -526,17 +586,12 @@ async function updateAppointmentStatus(request, id) {
   const current = await getRawByGsi2(`APPOINTMENT#${id}`, "Không tìm thấy lịch hẹn.");
   const status = requireEnum(body.status, appointmentStatuses, "status");
   assertAppointmentTransition(current.status, status, true);
-  const now = new Date().toISOString();
-  const result = await updateItem({
-    key: { PK: current.PK, SK: current.SK },
-    updates: {
-      status,
-      adminNote: body.adminNote === undefined ? current.adminNote : optionalString(body.adminNote),
-      updatedAt: now,
-      updatedBy: request.claims.sub
-    },
-    condition: "attribute_exists(PK) AND attribute_exists(SK)"
-  });
+  const result = await updateAppointmentWithLock(current, {
+    status,
+    adminNote: body.adminNote === undefined ? current.adminNote : optionalString(body.adminNote),
+    updatedAt: new Date().toISOString(),
+    updatedBy: request.claims.sub
+  }, ["COMPLETED", "REJECTED", "CANCELLED"].includes(status));
   return { item: toAppointment(result.Attributes) };
 }
 
@@ -544,12 +599,11 @@ async function cancelCurrentUserAppointment(request, id) {
   const current = await getRawByGsi2(`APPOINTMENT#${id}`, "Không tìm thấy lịch hẹn.");
   if (!entityBelongsToCurrentUser(current, request)) throw httpError(403, "Bạn không có quyền hủy lịch hẹn này.");
   assertAppointmentTransition(current.status, "CANCELLED", false);
-  const now = new Date().toISOString();
-  const result = await updateItem({
-    key: { PK: current.PK, SK: current.SK },
-    updates: { status: "CANCELLED", updatedAt: now, updatedBy: request.claims.sub },
-    condition: "attribute_exists(PK) AND attribute_exists(SK)"
-  });
+  const result = await updateAppointmentWithLock(current, {
+    status: "CANCELLED",
+    updatedAt: new Date().toISOString(),
+    updatedBy: request.claims.sub
+  }, true);
   return { item: toAppointment(result.Attributes) };
 }
 
@@ -611,11 +665,15 @@ async function createContract(request) {
 }
 
 async function listContracts(request) {
-  const result = await queryEntity("CONTRACT", readLimit(request.query.limit, 100), request.query.nextToken);
-  let items = (result.Items ?? []).map(toContract);
-  if (request.query.status) items = items.filter((item) => item.status === request.query.status);
-  if (request.query.officeId) items = items.filter((item) => item.officeId === request.query.officeId);
-  if (request.query.customerId) items = items.filter((item) => item.customerId === request.query.customerId);
+  const result = await queryFilteredEntity(
+    "CONTRACT",
+    readLimit(request.query.limit, 100),
+    request.query.nextToken,
+    (item) => (!request.query.status || item.status === request.query.status) &&
+      (!request.query.officeId || item.officeId === request.query.officeId) &&
+      (!request.query.customerId || item.customerId === request.query.customerId)
+  );
+  const items = (result.Items ?? []).map(toContract);
   return { items, count: items.length, nextToken: encodeNextToken(result.LastEvaluatedKey) };
 }
 
@@ -636,28 +694,26 @@ async function updateCurrentUserProfile(request) {
   const now = new Date().toISOString();
   const key = userProfileKey(request.claims.sub);
   const existing = await dynamo.send(new GetCommand({ TableName: tableName, Key: key }));
-
-  const item = {
-    ...key,
-    GSI1PK: "ENTITY#USER_PROFILE",
-    GSI1SK: `USER_PROFILE#${existing.Item?.createdAt ?? now}#${request.claims.sub}`,
-    GSI2PK: `USER_PROFILE#${request.claims.sub}`,
-    GSI2SK: "METADATA",
-    entityType: "USER_PROFILE",
-    id: request.claims.sub,
-    sub: request.claims.sub,
-    email: request.claims.email ?? existing.Item?.email ?? "",
-    displayName: body.displayName === undefined ? existing.Item?.displayName ?? request.claims.name ?? "" : optionalString(body.displayName),
-    phone: body.phone === undefined ? existing.Item?.phone ?? "" : optionalString(body.phone),
-    avatarKey: existing.Item?.avatarKey ?? "",
-    avatarDataUrl: existing.Item?.avatarDataUrl ?? "",
-    createdAt: existing.Item?.createdAt ?? now,
-    updatedAt: now,
-    updatedBy: request.claims.sub
-  };
-
-  await dynamo.send(new PutCommand({ TableName: tableName, Item: item }));
-  return { item: await hydrateUserProfileAvatar(toUserProfile(item, request.claims)) };
+  const createdAt = existing.Item?.createdAt ?? now;
+  const result = await updateItem({
+    key,
+    updates: {
+      GSI1PK: "ENTITY#USER_PROFILE",
+      GSI1SK: `USER_PROFILE#${createdAt}#${request.claims.sub}`,
+      GSI2PK: `USER_PROFILE#${request.claims.sub}`,
+      GSI2SK: "METADATA",
+      entityType: "USER_PROFILE",
+      id: request.claims.sub,
+      sub: request.claims.sub,
+      email: request.claims.email ?? existing.Item?.email ?? "",
+      displayName: body.displayName === undefined ? existing.Item?.displayName ?? request.claims.name ?? "" : optionalString(body.displayName),
+      phone: body.phone === undefined ? existing.Item?.phone ?? "" : optionalString(body.phone),
+      createdAt,
+      updatedAt: now,
+      updatedBy: request.claims.sub
+    }
+  });
+  return { item: await hydrateUserProfileAvatar(toUserProfile(result.Attributes, request.claims)) };
 }
 
 async function createAvatarUploadUrl(request) {
@@ -685,15 +741,33 @@ async function confirmAvatarUpload(request) {
   const profileKey = userProfileKey(request.claims.sub);
   const existing = await dynamo.send(new GetCommand({ TableName: tableName, Key: profileKey }));
   const now = new Date().toISOString();
-  const item = {
-    ...(existing.Item ?? defaultUserProfileItem(request.claims, now)),
-    ...profileKey,
-    avatarKey: key,
-    avatarDataUrl: "",
-    updatedAt: now,
-    updatedBy: request.claims.sub
-  };
-  await dynamo.send(new PutCommand({ TableName: tableName, Item: item }));
+  let item;
+  if (existing.Item) {
+    const updated = await updateItem({
+      key: profileKey,
+      updates: { avatarKey: key, avatarDataUrl: "", updatedAt: now, updatedBy: request.claims.sub },
+      condition: "attribute_exists(PK) AND attribute_exists(SK)"
+    });
+    item = updated.Attributes;
+  } else {
+    const initial = { ...defaultUserProfileItem(request.claims, now), avatarKey: key };
+    try {
+      await dynamo.send(new PutCommand({
+        TableName: tableName,
+        Item: initial,
+        ConditionExpression: "attribute_not_exists(PK) AND attribute_not_exists(SK)"
+      }));
+      item = initial;
+    } catch (error) {
+      if (error.name !== "ConditionalCheckFailedException") throw error;
+      const updated = await updateItem({
+        key: profileKey,
+        updates: { avatarKey: key, avatarDataUrl: "", updatedAt: now, updatedBy: request.claims.sub },
+        condition: "attribute_exists(PK) AND attribute_exists(SK)"
+      });
+      item = updated.Attributes;
+    }
+  }
 
   const previousKey = existing.Item?.avatarKey;
   if (previousKey && previousKey !== key && previousKey.startsWith(`avatars/${request.claims.sub}/`)) {
@@ -742,11 +816,12 @@ async function updateContract(request, id) {
     return await getContractById(id);
   }
 
-  const result = await updateItem({
-    key: { PK: current.PK, SK: current.SK },
-    updates,
-    condition: "attribute_exists(PK) AND attribute_exists(SK)"
-  });
+    const result = await updateEntityWithOptionalLockDelete(
+      current,
+      updates,
+      null,
+      "Hợp đồng vừa được cập nhật bởi một thao tác khác. Vui lòng tải lại dữ liệu."
+    );
   return { item: toContract(result.Attributes) };
 }
 
@@ -754,11 +829,12 @@ async function deleteContract(request, id) {
   const current = await getRawByGsi2(`CONTRACT#${id}`, "Không tìm thấy hợp đồng.");
   assertContractCanBeDeleted(current);
   const now = new Date().toISOString();
-  const result = await updateItem({
-    key: { PK: current.PK, SK: current.SK },
-    updates: { status: "TERMINATED", deletedAt: now, deletedBy: request.claims.sub ?? "admin", updatedAt: now, updatedBy: request.claims.sub ?? "admin" },
-    condition: "attribute_exists(PK) AND attribute_exists(SK)"
-  });
+    const result = await updateEntityWithOptionalLockDelete(
+      current,
+      { status: "TERMINATED", deletedAt: now, deletedBy: request.claims.sub ?? "admin", updatedAt: now, updatedBy: request.claims.sub ?? "admin" },
+      null,
+      "Hợp đồng vừa thay đổi trạng thái. Vui lòng tải lại dữ liệu trước khi xóa."
+    );
   return { item: toContract(result.Attributes) };
 }
 
@@ -810,14 +886,21 @@ async function confirmContractFile(request, contractId) {
     updates: { fileKey: finalKey, updatedAt: now, updatedBy: request.claims.sub },
     condition: "attribute_exists(PK) AND attribute_exists(SK)"
   });
+  if (contract.fileKey && contract.fileKey !== finalKey && contract.fileKey.startsWith("contracts/")) {
+    await s3.send(new DeleteObjectCommand({ Bucket: storageBucketName, Key: contract.fileKey })).catch(() => undefined);
+  }
   return { item: toContract(result.Attributes) };
 }
 
 async function listCustomers(request) {
-  const result = await queryEntity("CUSTOMER", readLimit(request.query.limit, 100), request.query.nextToken);
-  let items = (result.Items ?? []).map(toCustomer);
   const query = request.query.q?.toLowerCase();
-  if (query) items = items.filter((item) => `${item.name} ${item.email}`.toLowerCase().includes(query));
+  const result = await queryFilteredEntity(
+    "CUSTOMER",
+    readLimit(request.query.limit, 100),
+    request.query.nextToken,
+    (item) => !query || `${item.name} ${item.email}`.toLowerCase().includes(query)
+  );
+  const items = (result.Items ?? []).map(toCustomer);
   return { items, count: items.length, nextToken: encodeNextToken(result.LastEvaluatedKey) };
 }
 
@@ -863,18 +946,22 @@ async function createCustomer(request) {
 async function updateCustomer(request, id) {
   const body = parseBody(request.event);
   const current = await getRawByGsi2(`CUSTOMER#${id}`, "Không tìm thấy khách hàng.");
+  if (body.status === "INACTIVE" && current.status !== "INACTIVE") {
+    await assertCustomerCanBeDeleted(request, current);
+  }
   const now = new Date().toISOString();
-  const result = await updateItem({
-    key: { PK: current.PK, SK: current.SK },
-    updates: pickDefined({
-      name: body.name === undefined ? undefined : requireString(body.name, "name"),
+    const result = await updateEntityWithOptionalLockDelete(
+      current,
+      pickDefined({
+        name: body.name === undefined ? undefined : requireString(body.name, "name"),
       phone: body.phone === undefined ? undefined : optionalString(body.phone),
       status: body.status === undefined ? undefined : requireEnum(body.status, new Set(["ACTIVE", "INACTIVE"]), "status"),
-      updatedAt: now,
-      updatedBy: request.claims.sub ?? "admin"
-    }),
-    condition: "attribute_exists(PK) AND attribute_exists(SK)"
-  });
+        updatedAt: now,
+        updatedBy: request.claims.sub ?? "admin"
+      }),
+      null,
+      "Khách hàng vừa được cập nhật bởi một thao tác khác. Vui lòng tải lại dữ liệu."
+    );
   return { item: toCustomer(result.Attributes) };
 }
 
@@ -882,11 +969,12 @@ async function deleteCustomer(request, id) {
   const current = await getRawByGsi2(`CUSTOMER#${id}`, "Không tìm thấy khách hàng.");
   await assertCustomerCanBeDeleted(request, current);
   const now = new Date().toISOString();
-  const result = await updateItem({
-    key: { PK: current.PK, SK: current.SK },
-    updates: { status: "INACTIVE", deletedAt: now, deletedBy: request.claims.sub ?? "admin", updatedAt: now, updatedBy: request.claims.sub ?? "admin" },
-    condition: "attribute_exists(PK) AND attribute_exists(SK)"
-  });
+    const result = await updateEntityWithOptionalLockDelete(
+      current,
+      { status: "INACTIVE", deletedAt: now, deletedBy: request.claims.sub ?? "admin", updatedAt: now, updatedBy: request.claims.sub ?? "admin" },
+      null,
+      "Khách hàng vừa thay đổi trạng thái. Vui lòng tải lại dữ liệu trước khi xóa."
+    );
   return { item: toCustomer(result.Attributes) };
 }
 
@@ -1004,7 +1092,10 @@ async function activateNewContract(contract, rentalRequest) {
     activeContractLockPut(contract, now),
     officeLeaseUpdate(contract.officeId, contract.id, now)
   ];
-  if (rentalRequest) transactItems.push(rentalRequestApprovalUpdate(rentalRequest, now));
+  if (rentalRequest) {
+    transactItems.push(rentalRequestApprovalUpdate(rentalRequest, now));
+    transactItems.push(rentalRequestLockDelete(rentalRequest));
+  }
   await sendContractTransaction(transactItems);
 }
 
@@ -1026,16 +1117,22 @@ async function activateExistingContract(contract, updates, rentalRequest) {
     activeContractLockPut(contract, now),
     officeLeaseUpdate(contract.officeId, contract.id, now)
   ];
-  if (rentalRequest) transactItems.push(rentalRequestApprovalUpdate(rentalRequest, now));
+  if (rentalRequest) {
+    transactItems.push(rentalRequestApprovalUpdate(rentalRequest, now));
+    transactItems.push(rentalRequestLockDelete(rentalRequest));
+  }
   await sendContractTransaction(transactItems);
 }
 
-async function deactivateContract(contract, updates) {
+  async function deactivateContract(contract, updates) {
   const now = new Date().toISOString();
   const updateParts = buildUpdateParts(updates);
   updateParts.values[":expectedStatus"] = "ACTIVE";
-  const lockKey = activeContractLockKey(contract.officeId);
-  const lock = await dynamo.send(new GetCommand({ TableName: tableName, Key: lockKey }));
+    const lockKey = activeContractLockKey(contract.officeId);
+    const lock = await dynamo.send(new GetCommand({ TableName: tableName, Key: lockKey }));
+    if (lock.Item && lock.Item.contractId !== contract.id) {
+      throw httpError(409, "Khóa văn phòng thuộc hợp đồng khác. Vui lòng kiểm tra dữ liệu trước khi kết thúc hợp đồng.");
+    }
   const transactItems = [
     {
       Update: {
@@ -1053,8 +1150,14 @@ async function deactivateContract(contract, updates) {
         Key: officeKey(contract.officeId),
         UpdateExpression: "SET #status = :available, updatedAt = :now, updatedBy = :actor REMOVE activeContractId",
         ExpressionAttributeNames: { "#status": "status" },
-        ExpressionAttributeValues: { ":available": "AVAILABLE", ":now": now, ":actor": "contract-workflow", ":leased": "LEASED" },
-        ConditionExpression: "attribute_exists(PK) AND #status = :leased"
+          ExpressionAttributeValues: {
+            ":available": "AVAILABLE",
+            ":now": now,
+            ":actor": "contract-workflow",
+            ":leased": "LEASED",
+            ":contractId": contract.id
+          },
+          ConditionExpression: "attribute_exists(PK) AND #status = :leased AND activeContractId = :contractId"
       }
     }
   ];
@@ -1111,12 +1214,146 @@ function rentalRequestApprovalUpdate(rentalRequest, now) {
     Update: {
       TableName: tableName,
       Key: { PK: rentalRequest.PK, SK: rentalRequest.SK },
-      UpdateExpression: "SET #status = :approved, updatedAt = :now, updatedBy = :actor",
+      UpdateExpression: "SET #status = :approved, convertedAt = :now, updatedAt = :now, updatedBy = :actor",
       ExpressionAttributeNames: { "#status": "status" },
-      ExpressionAttributeValues: { ":approved": "APPROVED", ":now": now, ":actor": "contract-workflow" },
-      ConditionExpression: "attribute_exists(PK) AND attribute_exists(SK)"
+      ExpressionAttributeValues: {
+        ":pending": "PENDING",
+        ":approved": "APPROVED",
+        ":now": now,
+        ":actor": "contract-workflow"
+      },
+      ConditionExpression: "attribute_exists(PK) AND attribute_exists(SK) AND #status IN (:pending, :approved)"
     }
   };
+}
+
+function rentalRequestLockDelete(rentalRequest) {
+  return {
+    Delete: {
+      TableName: tableName,
+      Key: rentalRequestLockKey(rentalRequest.officeId, rentalRequest.email)
+    }
+  };
+}
+
+async function createRentalRequestWithLock(item) {
+  const lockKey = rentalRequestLockKey(item.officeId, item.email);
+  try {
+    await dynamo.send(new TransactWriteCommand({
+      TransactItems: [
+        {
+          Put: {
+            TableName: tableName,
+            Item: item,
+            ConditionExpression: "attribute_not_exists(PK) AND attribute_not_exists(SK)"
+          }
+        },
+        {
+          Put: {
+            TableName: tableName,
+            Item: {
+              ...lockKey,
+              entityType: "OPEN_RENTAL_REQUEST_LOCK",
+              requestId: item.id,
+              email: item.email,
+              createdAt: item.createdAt
+            },
+            ConditionExpression: "attribute_not_exists(PK) AND attribute_not_exists(SK)"
+          }
+        }
+      ]
+    }));
+  } catch (error) {
+    if (error.name === "TransactionCanceledException") {
+      throw httpError(409, "Bạn đã có một yêu cầu thuê đang được xử lý cho văn phòng này.");
+    }
+    throw error;
+  }
+}
+
+async function updateRentalRequestWithLock(current, updates, releaseLock) {
+  return await updateEntityWithOptionalLockDelete(
+    current,
+    updates,
+    releaseLock ? rentalRequestLockKey(current.officeId, current.email) : null,
+    "Yêu cầu thuê vừa được cập nhật bởi một thao tác khác. Vui lòng tải lại dữ liệu."
+  );
+}
+
+async function createAppointmentWithLock(item) {
+  const lockKey = appointmentLockKey(item.officeId, item.email, item.scheduledAt);
+  try {
+    await dynamo.send(new TransactWriteCommand({
+      TransactItems: [
+        {
+          Put: {
+            TableName: tableName,
+            Item: item,
+            ConditionExpression: "attribute_not_exists(PK) AND attribute_not_exists(SK)"
+          }
+        },
+        {
+          Put: {
+            TableName: tableName,
+            Item: {
+              ...lockKey,
+              entityType: "APPOINTMENT_LOCK",
+              appointmentId: item.id,
+              email: item.email,
+              scheduledAt: item.scheduledAt,
+              createdAt: item.createdAt
+            },
+            ConditionExpression: "attribute_not_exists(PK) AND attribute_not_exists(SK)"
+          }
+        }
+      ]
+    }));
+  } catch (error) {
+    if (error.name === "TransactionCanceledException") {
+      throw httpError(409, "Bạn đã có lịch hẹn cho văn phòng vào thời gian này.");
+    }
+    throw error;
+  }
+}
+
+async function updateAppointmentWithLock(current, updates, releaseLock) {
+  return await updateEntityWithOptionalLockDelete(
+    current,
+    updates,
+    releaseLock ? appointmentLockKey(current.officeId, current.email, current.scheduledAt) : null,
+    "Lịch hẹn vừa được cập nhật bởi một thao tác khác. Vui lòng tải lại dữ liệu."
+  );
+}
+
+async function updateEntityWithOptionalLockDelete(current, updates, lockKey, conflictMessage) {
+  const parts = buildUpdateParts(updates);
+  parts.names["#expectedStatus"] = "status";
+  parts.values[":expectedStatus"] = current.status;
+  const transactItems = [{
+    Update: {
+      TableName: tableName,
+      Key: { PK: current.PK, SK: current.SK },
+      UpdateExpression: parts.expression,
+      ExpressionAttributeNames: parts.names,
+      ExpressionAttributeValues: parts.values,
+      ConditionExpression: "attribute_exists(PK) AND attribute_exists(SK) AND #expectedStatus = :expectedStatus"
+    }
+  }];
+  if (lockKey) transactItems.push({ Delete: { TableName: tableName, Key: lockKey } });
+
+  try {
+    await dynamo.send(new TransactWriteCommand({ TransactItems: transactItems }));
+  } catch (error) {
+    if (error.name === "TransactionCanceledException") throw httpError(409, conflictMessage);
+    throw error;
+  }
+
+  const result = await dynamo.send(new GetCommand({
+    TableName: tableName,
+    Key: { PK: current.PK, SK: current.SK },
+    ConsistentRead: true
+  }));
+  return { Attributes: result.Item };
 }
 
 async function sendContractTransaction(transactItems) {
@@ -1167,6 +1404,9 @@ function validateContractDates(startDate, endDate, status) {
   if (startDate && endDate && new Date(startDate).getTime() >= new Date(endDate).getTime()) {
     throw httpError(400, "Ngày bắt đầu hợp đồng phải trước ngày kết thúc.");
   }
+  if (status === "ACTIVE" && contractEndTimestamp(endDate) <= Date.now()) {
+    throw httpError(400, "Không thể kích hoạt hợp đồng đã hết hạn.");
+  }
 }
 
 function contractBelongsToCurrentUser(contract, request) {
@@ -1182,7 +1422,8 @@ async function assertNoOpenRentalRequest(officeId, email) {
   const duplicate = children.find((item) => (
     item.entityType === "RENTAL_REQUEST" &&
     item.email?.toLowerCase() === email.toLowerCase() &&
-    blockingRentalRequestStatuses.has(item.status)
+    blockingRentalRequestStatuses.has(item.status) &&
+    !item.convertedAt
   ));
   if (duplicate) throw httpError(409, "Bạn đã có một yêu cầu thuê đang được xử lý cho văn phòng này.");
 }
@@ -1196,6 +1437,20 @@ async function assertNoDuplicateAppointment(officeId, email, scheduledAt) {
     !["REJECTED", "CANCELLED"].includes(item.status)
   ));
   if (duplicate) throw httpError(409, "Bạn đã có lịch hẹn vào thời gian này.");
+}
+
+function rentalRequestLockKey(officeId, email) {
+  return {
+    PK: `OFFICE#${officeId}`,
+    SK: `LOCK#RENTAL_REQUEST#${stableHash(email)}`
+  };
+}
+
+function appointmentLockKey(officeId, email, scheduledAt) {
+  return {
+    PK: `OFFICE#${officeId}`,
+    SK: `LOCK#APPOINTMENT#${stableHash(`${email}|${scheduledAt}`)}`
+  };
 }
 
 function assertAppointmentTransition(currentStatus, nextStatus, admin) {
@@ -1216,6 +1471,12 @@ function assertAppointmentTransition(currentStatus, nextStatus, admin) {
   }
 }
 
+function assertRentalRequestTransition(currentStatus, nextStatus) {
+  if (!canTransitionRentalRequest(currentStatus, nextStatus)) {
+    throw httpError(409, `Không thể chuyển yêu cầu thuê từ ${currentStatus} sang ${nextStatus}.`);
+  }
+}
+
 function entityBelongsToCurrentUser(entity, request) {
   return hasIdentityOverlap(
     normalizedIdentitySet(entity.customerId, entity.email, entity.createdBy),
@@ -1228,6 +1489,30 @@ async function assertOfficeExists(id) {
   if (!result.Item || result.Item.status === "INACTIVE") {
     throw httpError(400, "Văn phòng không tồn tại hoặc đã ngừng hoạt động.");
   }
+}
+
+async function assertOfficeAcceptsRequests(id) {
+  const result = await dynamo.send(new GetCommand({ TableName: tableName, Key: officeKey(id) }));
+  if (!result.Item || !["AVAILABLE", "RESERVED"].includes(result.Item.status)) {
+    throw httpError(409, "Văn phòng hiện không sẵn sàng nhận thêm yêu cầu thuê.");
+  }
+  return result.Item;
+}
+
+async function assertOfficeStatusUpdateAllowed(office, nextStatus) {
+  if (office.status === nextStatus) return;
+  const lock = await dynamo.send(new GetCommand({
+    TableName: tableName,
+    Key: activeContractLockKey(office.id)
+  }));
+
+  if (lock.Item && nextStatus !== "LEASED") {
+    throw httpError(409, "Văn phòng đang có hợp đồng hiệu lực nên phải giữ trạng thái LEASED.");
+  }
+  if (!lock.Item && nextStatus === "LEASED") {
+    throw httpError(409, "Chỉ quy trình kích hoạt hợp đồng mới được chuyển văn phòng sang LEASED.");
+  }
+  if (nextStatus === "INACTIVE") await assertOfficeCanBeDeleted(office.id);
 }
 
 async function hydrateOfficeImageUrls(offices) {
@@ -1315,18 +1600,23 @@ function encodeS3CopySource(key) {
   return key.split("/").map(encodeURIComponent).join("/");
 }
 
-async function assertOfficeCanBeDeleted(id) {
+  async function assertOfficeCanBeDeleted(id) {
   const office = await dynamo.send(new GetCommand({ TableName: tableName, Key: officeKey(id) }));
   if (!office.Item) throw httpError(404, "Không tìm thấy văn phòng.");
 
   const children = await queryItemsByPk(`OFFICE#${id}`);
   const openContracts = children.filter((item) => item.entityType === "CONTRACT" && blockingContractStatuses.has(item.status));
-  const openRentalRequests = children.filter((item) => item.entityType === "RENTAL_REQUEST" && blockingRentalRequestStatuses.has(item.status));
+  const openRentalRequests = children.filter((item) => (
+    item.entityType === "RENTAL_REQUEST" &&
+    blockingRentalRequestStatuses.has(item.status) &&
+    !item.convertedAt
+  ));
 
-  if (openContracts.length > 0 || openRentalRequests.length > 0) {
-    throw httpError(409, buildDeleteBlockMessage("văn phòng này", openContracts.length, openRentalRequests.length));
+    if (openContracts.length > 0 || openRentalRequests.length > 0) {
+      throw httpError(409, buildDeleteBlockMessage("văn phòng này", openContracts.length, openRentalRequests.length));
+    }
+    return office.Item;
   }
-}
 
 async function assertRentalRequestCanBeDeleted(requestItem) {
   if (requestItem.status === "APPROVED") {
@@ -1369,6 +1659,7 @@ async function assertCustomerCanBeDeleted(request, customerItem) {
   ));
   const openRentalRequests = rentalRequests.filter((item) => (
     blockingRentalRequestStatuses.has(item.status) &&
+    !item.convertedAt &&
     hasIdentityOverlap(customerKeys, normalizedIdentitySet(item.email, item.createdBy))
   ));
 
@@ -1448,16 +1739,46 @@ async function listEntityItems(entityType) {
   return items;
 }
 
-async function queryEntity(entityType, limit, nextToken) {
-  return await dynamo.send(new QueryCommand({
-    TableName: tableName,
-    IndexName: "GSI1",
-    KeyConditionExpression: "GSI1PK = :pk",
-    ExpressionAttributeValues: { ":pk": `ENTITY#${entityType}` },
-    ScanIndexForward: false,
-    Limit: limit,
-    ExclusiveStartKey: decodeNextToken(nextToken)
-  }));
+async function queryFilteredEntity(entityType, limit, nextToken, predicate = () => true) {
+  const items = [];
+  let exclusiveStartKey = decodeNextToken(nextToken);
+
+  while (items.length < limit) {
+    const result = await dynamo.send(new QueryCommand({
+      TableName: tableName,
+      IndexName: "GSI1",
+      KeyConditionExpression: "GSI1PK = :pk",
+      ExpressionAttributeValues: { ":pk": `ENTITY#${entityType}` },
+      ScanIndexForward: false,
+      Limit: Math.min(Math.max(limit * 2, 50), 200),
+      ExclusiveStartKey: exclusiveStartKey
+    }));
+    const page = result.Items ?? [];
+
+    for (let index = 0; index < page.length; index += 1) {
+      const item = page[index];
+      if (!predicate(item)) continue;
+      items.push(item);
+      if (items.length === limit) {
+        const hasMore = index < page.length - 1 || Boolean(result.LastEvaluatedKey);
+        return { Items: items, LastEvaluatedKey: hasMore ? entityCursor(item) : undefined };
+      }
+    }
+
+    if (!result.LastEvaluatedKey) return { Items: items, LastEvaluatedKey: undefined };
+    exclusiveStartKey = result.LastEvaluatedKey;
+  }
+
+  return { Items: items, LastEvaluatedKey: exclusiveStartKey };
+}
+
+function entityCursor(item) {
+  return {
+    PK: item.PK,
+    SK: item.SK,
+    GSI1PK: item.GSI1PK,
+    GSI1SK: item.GSI1SK
+  };
 }
 
 async function queryCustomerEntities(request, entityPrefix) {

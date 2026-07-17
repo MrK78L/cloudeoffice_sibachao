@@ -26,8 +26,9 @@ export async function getOffices(params: OfficeSearchParams = {}) {
   const searchParams = new URLSearchParams();
   if (params.q) searchParams.set("q", params.q);
   if (params.status) searchParams.set("status", params.status);
+  if (params.nextToken) searchParams.set("nextToken", params.nextToken);
   const query = searchParams.toString() ? `?${searchParams.toString()}` : "";
-  return apiRequest<{ items: Office[] }>(`/offices${query}`);
+  return apiRequest<{ items: Office[]; nextToken?: string }>(`/offices${query}`);
 }
 
 export async function getOffice(id: string) {

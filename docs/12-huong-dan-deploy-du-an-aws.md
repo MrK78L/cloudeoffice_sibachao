@@ -1,6 +1,6 @@
 # Hướng dẫn deploy Cloud Office lên AWS
 
-Ngày cập nhật: 2026-07-12
+Ngày cập nhật: 2026-07-17
 
 Tài liệu này áp dụng cho source hiện tại của dự án Cloud Office. Quy trình được chia thành nhiều giai đoạn để backend không bị mất nếu CloudFront chưa được AWS duyệt.
 
@@ -34,9 +34,11 @@ node --version
 npm --version
 aws --version
 sam --version
+docker --version
 ```
 
 Node.js phải là phiên bản 22.x.
+Docker Desktop phải được cài đặt và đang chạy. Backend bắt buộc build bằng `sam build --use-container` để `sharp` được cài cho Lambda Linux, không phải Windows.
 
 Kiểm tra AWS CLI:
 
@@ -84,6 +86,7 @@ Build sạch:
 
 ```powershell
 sam build `
+  --use-container `
   --config-file samconfig.toml `
   --no-cached
 ```
@@ -102,6 +105,7 @@ sam deploy `
     ProjectName=cloffice `
     AlertEmail=YOUR_REAL_EMAIL `
     CorsAllowOrigin="*" `
+    EnablePointInTimeRecovery=false `
     EnableCloudFront=false
 ```
 
@@ -213,6 +217,7 @@ Chỉ thực hiện khi AWS đã duyệt CloudFront cho tài khoản.
 cd D:\THUCTAPTT\cloudoffice\backend
 
 sam build `
+  --use-container `
   --config-file samconfig.toml `
   --no-cached
 
@@ -223,6 +228,7 @@ sam deploy `
     ProjectName=cloffice `
     AlertEmail=YOUR_REAL_EMAIL `
     CorsAllowOrigin="*" `
+    EnablePointInTimeRecovery=false `
     EnableCloudFront=true
 ```
 
@@ -361,7 +367,7 @@ Remove-Item -LiteralPath D:\THUCTAPTT\cloudoffice\backend\.aws-sam -Recurse -For
 
 cd D:\THUCTAPTT\cloudoffice\backend
 npm run install:all
-sam build --config-file samconfig.toml --no-cached
+sam build --use-container --config-file samconfig.toml --no-cached
 ```
 
 Không chạy `git reset --hard` hoặc xóa source để sửa lỗi build.

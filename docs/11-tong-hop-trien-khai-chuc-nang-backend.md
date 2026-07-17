@@ -1,6 +1,6 @@
 # Tổng hợp chức năng backend đã triển khai
 
-Ngày cập nhật: 2026-07-11
+Ngày cập nhật: 2026-07-17
 
 ## 1. Trạng thái triển khai
 
@@ -20,6 +20,8 @@ Các thay đổi trong tài liệu này mới được triển khai trong source
 - Email của khách phải trùng email trong Cognito JWT.
 - Admin được phép tạo yêu cầu thay khách với email khác.
 - Chặn một khách tạo nhiều yêu cầu đang mở cho cùng một văn phòng.
+- Dùng khóa idempotency trong transaction để hai request đồng thời không tạo bản ghi trùng.
+- Áp dụng state machine và điều kiện trạng thái khi admin duyệt hoặc từ chối yêu cầu.
 - Rental request mới có `GSI3` để truy vấn trực tiếp theo khách hàng, không quét toàn bảng.
 
 ### Hợp đồng
@@ -36,6 +38,7 @@ Các thay đổi trong tài liệu này mới được triển khai trong source
   - Rental request liên quan sang `APPROVED`.
   - Khóa hợp đồng hiệu lực của văn phòng.
 - Khi kết thúc hợp đồng, transaction giải phóng khóa và đưa văn phòng về `AVAILABLE`.
+- Không cho admin đổi trạng thái văn phòng hoặc khách hàng nếu việc đổi đó phá vỡ hợp đồng đang hiệu lực.
 
 ### Upload hợp đồng PDF
 
@@ -56,6 +59,8 @@ Các thay đổi trong tài liệu này mới được triển khai trong source
 - Image Processor xóa ảnh vượt quá giới hạn từ S3.
 - Sharp giới hạn tối đa 40 triệu pixel để giảm rủi ro ảnh giải nén quá lớn.
 - Ảnh hợp lệ được xoay đúng EXIF, resize tối đa 1280 px và chuyển WebP.
+- Admin xác nhận upload qua API sau khi PUT S3; metadata chỉ được gắn khi object thực sự tồn tại.
+- Event S3 xử lý sớm được giữ lại để tránh tranh chấp với request xác nhận upload.
 
 ### Avatar người dùng
 
@@ -110,7 +115,8 @@ Lambda mới: `ContractExpiryNotifierFunction`.
 - EventBridge chạy mỗi ngày lúc 01:00 UTC.
 - Truy vấn hợp đồng bằng GSI1, không dùng Scan.
 - Lọc hợp đồng `ACTIVE` hết hạn trong 30 ngày.
-- Gửi một email tổng hợp qua SNS topic hiện có.
+- Tự động chuyển hợp đồng quá hạn sang `EXPIRED`, giải phóng khóa và đưa văn phòng về `AVAILABLE` bằng transaction.
+- Gửi một email tổng hợp qua SNS topic hiện có và đánh dấu ngày đã cảnh báo để không gửi lặp mỗi ngày.
 - EventBridge Scheduler có hạn mức miễn phí lớn; một lần chạy mỗi ngày gần như không đáng kể về chi phí.
 
 ## 7. DynamoDB
@@ -119,7 +125,8 @@ Lambda mới: `ContractExpiryNotifierFunction`.
 - Thêm `GSI3` để truy vấn dữ liệu theo khách hàng.
 - API danh sách trả thêm `nextToken` từ `LastEvaluatedKey`.
 - Dashboard admin đọc đủ các trang dữ liệu thay vì giới hạn 200 item.
-- Chưa bật Point-in-Time Recovery để giữ chi phí thấp; nên bật khi bắt đầu lưu dữ liệu production quan trọng.
+- `EnablePointInTimeRecovery=false` là mặc định để giữ chi phí thấp; đặt thành `true` khi lưu dữ liệu production quan trọng.
+- Bật mã hóa SSE cho DynamoDB và ba bucket S3; log Lambda được giữ 14 ngày.
 
 Lưu ý: bảng DynamoDB Local cũ không có GSI3. Cần xóa và seed lại bảng local trước khi chạy test mới. Stack AWS trước đó đã bị xóa nên lần deploy sau sẽ tạo bảng mới đúng schema.
 
@@ -132,7 +139,6 @@ Template tùy chọn:
 Template gồm:
 
 - AWS Managed Common Rule Set.
-- Rate limit 1.000 request/IP trong 5 phút.
 - Web ACL scope `CLOUDFRONT`.
 
 WAF CloudFront bắt buộc tạo tại `us-east-1`. Sau khi AWS duyệt CloudFront:
@@ -143,7 +149,7 @@ WAF CloudFront bắt buộc tạo tại `us-east-1`. Sau khi AWS duyệt CloudFr
 4. Truyền ARN vào parameter `CloudFrontWebAclArn` của stack chính.
 5. Đặt `EnableCloudFront=true`.
 
-Không deploy WAF khi chỉ test local. Cấu hình tối thiểu dự kiến khoảng 7 USD/tháng cộng phí request, nên 150 USD credit cần được theo dõi cùng ngày hết hạn credit.
+Không deploy WAF khi chỉ test local. WAF có phí cố định và phí theo request; cần kiểm tra bảng giá AWS hiện hành trước khi bật.
 
 ## 9. File đã loại bỏ
 
@@ -163,7 +169,7 @@ node --check backend/seed-data.mjs
 
 cd backend
 sam validate --template-file infra/template.yaml --lint --region ap-southeast-1
-sam build --config-file samconfig.toml --no-cached
+sam build --use-container --config-file samconfig.toml --no-cached
 
 cd ..
 npm --prefix frontend run build
@@ -173,7 +179,7 @@ Kết quả tại thời điểm cập nhật:
 
 - Node syntax: đạt.
 - SAM template validation: đạt.
-- SAM build ba Lambda Node.js 22.x: đạt.
+- SAM build ba Lambda Node.js 22.x: cần chạy lại sau khi bật Docker Desktop; không dùng artifact build trực tiếp trên Windows vì `sharp` sẽ sai nền tảng.
 - Frontend TypeScript và Vite build: đạt.
 
 ## 11. Các bước chỉ thực hiện khi sẵn sàng deploy lại
@@ -183,7 +189,7 @@ Không chạy các lệnh dưới đây trong giai đoạn chờ CloudFront.
 ```powershell
 cd D:\THUCTAPTT\cloudoffice\backend
 npm run install:all
-sam build --config-file samconfig.toml --no-cached
+sam build --use-container --config-file samconfig.toml --no-cached
 sam deploy --config-file samconfig.toml --template-file .aws-sam/build/template.yaml
 ```
 

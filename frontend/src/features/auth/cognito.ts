@@ -1,4 +1,6 @@
 const sessionKey = "orms.auth.session";
+export const authSessionChangedEvent = "orms:auth-session-changed";
+let refreshAccessTokenPromise: Promise<string> | null = null;
 
 type CognitoTokenResponse = {
   AccessToken: string;
@@ -49,12 +51,29 @@ export type ConfirmForgotPasswordInput = {
   password: string;
 };
 
+export class NewPasswordRequiredError extends Error {
+  constructor(public readonly challengeSession: string) {
+    super("Bạn cần đặt mật khẩu mới để hoàn tất đăng nhập.");
+    this.name = "NewPasswordRequiredError";
+  }
+}
+
 const cognitoConfig = {
   userPoolId: import.meta.env.VITE_COGNITO_USER_POOL_ID ?? "",
   clientId: import.meta.env.VITE_COGNITO_CLIENT_ID ?? ""
 };
 
 export function getAuthSession(): AuthSession | null {
+  const session = readStoredAuthSession();
+  if (!session) return null;
+  if (session.expiresAt && session.expiresAt <= Date.now() && !session.refreshToken) {
+    sessionStorage.removeItem(sessionKey);
+    return null;
+  }
+  return session;
+}
+
+function readStoredAuthSession(): AuthSession | null {
   const raw = sessionStorage.getItem(sessionKey);
   if (!raw) return null;
 
@@ -72,10 +91,45 @@ export function getAccessToken() {
 
 export function saveAuthSession(session: AuthSession) {
   sessionStorage.setItem(sessionKey, JSON.stringify(session));
+  notifyAuthSessionChanged();
 }
 
 export function logout() {
   sessionStorage.removeItem(sessionKey);
+  notifyAuthSessionChanged();
+}
+
+export async function getValidAccessToken() {
+  const session = readStoredAuthSession();
+  if (!session) return null;
+  if (!session.expiresAt || session.expiresAt > Date.now() + 60_000) return session.accessToken;
+  if (!session.refreshToken) {
+    logout();
+    return null;
+  }
+
+  if (refreshAccessTokenPromise) return await refreshAccessTokenPromise;
+  refreshAccessTokenPromise = refreshAccessToken(session).finally(() => {
+    refreshAccessTokenPromise = null;
+  });
+  return await refreshAccessTokenPromise;
+}
+
+async function refreshAccessToken(session: AuthSession) {
+  try {
+    const response = await callCognito<{ AuthenticationResult?: CognitoTokenResponse }>("InitiateAuth", {
+      AuthFlow: "REFRESH_TOKEN_AUTH",
+      ClientId: requireClientId(),
+      AuthParameters: { REFRESH_TOKEN: session.refreshToken }
+    });
+    if (!response.AuthenticationResult?.AccessToken) throw new Error("Missing refreshed access token");
+    const refreshed = createAuthSession(response.AuthenticationResult, session.refreshToken);
+    saveAuthSession(refreshed);
+    return refreshed.accessToken;
+  } catch {
+    logout();
+    throw new Error("Phiên đăng nhập đã hết hạn. Vui lòng đăng nhập lại.");
+  }
 }
 
 export function getUserFromSession(session: AuthSession | null): AuthUser | null {
@@ -98,6 +152,7 @@ export async function signInWithEmailPassword(input: SignInInput): Promise<AuthS
   const response = await callCognito<{
     AuthenticationResult?: CognitoTokenResponse;
     ChallengeName?: string;
+    Session?: string;
   }>("InitiateAuth", {
     AuthFlow: "USER_PASSWORD_AUTH",
     ClientId: requireClientId(),
@@ -107,23 +162,48 @@ export async function signInWithEmailPassword(input: SignInInput): Promise<AuthS
     }
   });
 
+  if (response.ChallengeName === "NEW_PASSWORD_REQUIRED" && response.Session) {
+    throw new NewPasswordRequiredError(response.Session);
+  }
   if (!response.AuthenticationResult?.AccessToken) {
-    throw new Error(response.ChallengeName
-      ? "Tài khoản cần thêm một bước xác thực. Vui lòng liên hệ quản trị viên."
-      : "Không thể đăng nhập lúc này. Vui lòng thử lại.");
+    throw new Error("Không thể đăng nhập lúc này. Vui lòng thử lại.");
   }
 
-  const session: AuthSession = {
-    accessToken: response.AuthenticationResult.AccessToken,
-    idToken: response.AuthenticationResult.IdToken,
-    refreshToken: response.AuthenticationResult.RefreshToken,
-    expiresAt: response.AuthenticationResult.ExpiresIn
-      ? Date.now() + response.AuthenticationResult.ExpiresIn * 1000
-      : undefined
-  };
-
+  const session = createAuthSession(response.AuthenticationResult);
   saveAuthSession(session);
   return session;
+}
+
+export async function completeNewPasswordChallenge(email: string, password: string, challengeSession: string) {
+  const response = await callCognito<{ AuthenticationResult?: CognitoTokenResponse }>("RespondToAuthChallenge", {
+    ChallengeName: "NEW_PASSWORD_REQUIRED",
+    ClientId: requireClientId(),
+    Session: challengeSession,
+    ChallengeResponses: {
+      USERNAME: email.trim().toLowerCase(),
+      NEW_PASSWORD: password
+    }
+  });
+  if (!response.AuthenticationResult?.AccessToken) {
+    throw new Error("Không thể hoàn tất thay đổi mật khẩu. Vui lòng thử lại.");
+  }
+
+  const session = createAuthSession(response.AuthenticationResult);
+  saveAuthSession(session);
+  return session;
+}
+
+function createAuthSession(tokens: CognitoTokenResponse, existingRefreshToken?: string): AuthSession {
+  return {
+    accessToken: tokens.AccessToken,
+    idToken: tokens.IdToken,
+    refreshToken: tokens.RefreshToken ?? existingRefreshToken,
+    expiresAt: tokens.ExpiresIn ? Date.now() + tokens.ExpiresIn * 1000 : undefined
+  };
+}
+
+function notifyAuthSessionChanged() {
+  if (typeof window !== "undefined") window.dispatchEvent(new Event(authSessionChangedEvent));
 }
 
 export async function signUpWithEmailPassword(input: SignUpInput) {

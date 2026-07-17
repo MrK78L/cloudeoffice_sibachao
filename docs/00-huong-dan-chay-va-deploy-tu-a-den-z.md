@@ -15,6 +15,7 @@ Can cai san:
 - npm 10+.
 - AWS CLI v2.
 - AWS SAM CLI.
+- Docker Desktop dang chay de build Lambda Linux dung cach.
 - Tai khoan AWS co quyen tao Lambda, API Gateway, DynamoDB, Cognito, S3, IAM, SNS.
 - Neu muon dung CloudFront: tai khoan AWS phai duoc AWS verify de tao CloudFront distribution.
 
@@ -25,6 +26,7 @@ node --version
 npm --version
 aws --version
 sam --version
+docker --version
 ```
 
 Region dang dung:
@@ -148,7 +150,7 @@ Chay:
 
 ```powershell
 cd D:\THUCTAPTT\cloudoffice\backend
-sam build --config-file samconfig.toml --no-cached
+sam build --use-container --config-file samconfig.toml --no-cached
 ```
 
 Ket qua dung:
@@ -509,7 +511,7 @@ Deploy lai:
 
 ```powershell
 cd D:\THUCTAPTT\cloudoffice\backend
-sam build --config-file samconfig.toml --no-cached
+sam build --use-container --config-file samconfig.toml --no-cached
 sam deploy --config-file samconfig.toml --template-file .aws-sam/build/template.yaml
 ```
 
@@ -530,7 +532,7 @@ Build lai sach:
 
 ```powershell
 cd D:\THUCTAPTT\cloudoffice\backend
-sam build --config-file samconfig.toml --no-cached
+sam build --use-container --config-file samconfig.toml --no-cached
 ```
 
 ### 17.4. User Cognito FORCE_CHANGE_PASSWORD
@@ -566,7 +568,7 @@ Backend:
 
 ```powershell
 cd D:\THUCTAPTT\cloudoffice\backend
-sam build --config-file samconfig.toml --no-cached
+sam build --use-container --config-file samconfig.toml --no-cached
 sam deploy --config-file samconfig.toml --template-file .aws-sam/build/template.yaml
 ```
 
@@ -604,4 +606,3 @@ Bat CloudFront:
 - Co website production public qua `CloudFrontUrl`.
 - S3 frontend bucket van private.
 - Can AWS account duoc verify de tao CloudFront.
-

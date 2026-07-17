@@ -34,11 +34,18 @@ export async function handler(event) {
     );
 
     const inputBuffer = await streamToBuffer(object.Body);
-    const outputBuffer = await sharp(inputBuffer, { limitInputPixels: 40_000_000, failOn: "error" })
-      .rotate()
-      .resize({ width: 1280, withoutEnlargement: true })
-      .webp({ quality: 82 })
-      .toBuffer();
+    let outputBuffer;
+    try {
+      outputBuffer = await sharp(inputBuffer, { limitInputPixels: 40_000_000, failOn: "error" })
+        .rotate()
+        .resize({ width: 1280, withoutEnlargement: true })
+        .webp({ quality: 82 })
+        .toBuffer();
+    } catch (error) {
+      console.warn(`Delete invalid image ${sourceBucket}/${sourceKey}: ${error.message}`);
+      await s3.send(new DeleteObjectCommand({ Bucket: sourceBucket, Key: sourceKey }));
+      continue;
+    }
 
     const targetKey = sourceKey.replace(/\.[^.]+$/, ".webp");
     await s3.send(
@@ -55,7 +62,12 @@ export async function handler(event) {
     );
 
     console.log(`Processed ${sourceBucket}/${sourceKey} -> ${processedBucketName}/${targetKey}`);
-    await markOfficeImageProcessed(sourceKey, targetKey);
+    const attached = await markOfficeImageProcessed(sourceKey, targetKey);
+    if (!attached) {
+      // The S3 event can finish before the admin confirmation request attaches the key.
+      // Keep the output so that confirmation can detect and attach the processed image.
+      console.log(`Processed image is waiting for confirmation: ${processedBucketName}/${targetKey}`);
+    }
   }
 
   return { processed: event.Records?.length ?? 0 };
@@ -74,10 +86,10 @@ async function streamToBuffer(stream) {
 }
 
 async function markOfficeImageProcessed(sourceKey, processedImageKey) {
-  if (!tableName) return;
+  if (!tableName) return false;
 
   const match = /^images\/offices\/([^/]+)\//.exec(sourceKey);
-  if (!match) return;
+  if (!match) return false;
 
   const officeId = decodeURIComponent(match[1]);
   try {
@@ -86,13 +98,19 @@ async function markOfficeImageProcessed(sourceKey, processedImageKey) {
       Key: { PK: `OFFICE#${officeId}`, SK: "METADATA" },
       UpdateExpression: "SET processedImageKey = :processedImageKey, processedImageReady = :ready, updatedAt = :updatedAt",
       ExpressionAttributeValues: {
+        ":sourceImageKey": sourceKey,
         ":processedImageKey": processedImageKey,
         ":ready": true,
         ":updatedAt": new Date().toISOString()
       },
-      ConditionExpression: "attribute_exists(PK) AND attribute_exists(SK)"
+      ConditionExpression: "attribute_exists(PK) AND attribute_exists(SK) AND imageKey = :sourceImageKey"
     }));
+    return true;
   } catch (error) {
-    console.warn(`Skip office image metadata update for ${officeId}: ${error.name}`);
+    if (error.name === "ConditionalCheckFailedException") {
+      console.warn(`Skip stale office image metadata update for ${officeId}`);
+      return false;
+    }
+    throw error;
   }
 }

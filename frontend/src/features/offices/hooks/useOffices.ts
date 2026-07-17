@@ -6,6 +6,8 @@ export function useOffices(params: OfficeSearchParams = {}) {
   const [items, setItems] = useState<Office[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [nextToken, setNextToken] = useState<string | undefined>();
+  const [isLoadingMore, setIsLoadingMore] = useState(false);
 
   useEffect(() => {
     let active = true;
@@ -14,7 +16,10 @@ export function useOffices(params: OfficeSearchParams = {}) {
 
     getOffices(params)
       .then((data) => {
-        if (active) setItems(data.items);
+        if (active) {
+          setItems(data.items);
+          setNextToken(data.nextToken);
+        }
       })
       .catch((requestError) => {
         if (!active) return;
@@ -28,6 +33,7 @@ export function useOffices(params: OfficeSearchParams = {}) {
             })
           : []);
         setError(requestError instanceof Error ? requestError.message : "Không thể tải danh sách văn phòng.");
+        setNextToken(undefined);
       })
       .finally(() => {
         if (active) setIsLoading(false);
@@ -38,5 +44,23 @@ export function useOffices(params: OfficeSearchParams = {}) {
     };
   }, [params.q, params.status]);
 
-  return { items, isLoading, error };
+  async function loadMore() {
+    if (!nextToken || isLoadingMore) return;
+    setIsLoadingMore(true);
+    try {
+      const data = await getOffices({ ...params, nextToken });
+      setItems((current) => {
+        const byId = new Map(current.map((office) => [office.id, office]));
+        for (const office of data.items) byId.set(office.id, office);
+        return [...byId.values()];
+      });
+      setNextToken(data.nextToken);
+    } catch (requestError) {
+      setError(requestError instanceof Error ? requestError.message : "Không thể tải thêm văn phòng.");
+    } finally {
+      setIsLoadingMore(false);
+    }
+  }
+
+  return { items, isLoading, isLoadingMore, hasMore: Boolean(nextToken), loadMore, error };
 }

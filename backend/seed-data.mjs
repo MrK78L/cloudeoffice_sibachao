@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { CreateTableCommand, DescribeTableCommand, DynamoDBClient } from "@aws-sdk/client-dynamodb";
 import { DynamoDBDocumentClient, PutCommand } from "@aws-sdk/lib-dynamodb";
 
@@ -90,7 +91,8 @@ const rentalRequests = [
     email: "linh.tran@example.com",
     phone: "0912345678",
     message: "Muốn xem văn phòng trong tuần này.",
-    status: "APPROVED"
+    status: "APPROVED",
+    convertedAt: now
   }
 ];
 
@@ -126,9 +128,11 @@ const items = [
   ...offices.map(toOfficeItem),
   ...customers.map(toCustomerItem),
   ...rentalRequests.map(toRentalRequestItem),
+  ...rentalRequests.filter((request) => ["PENDING", "APPROVED"].includes(request.status) && !request.convertedAt).map(toRentalRequestLockItem),
   ...contracts.map(toContractItem),
   ...contracts.filter((contract) => contract.status === "ACTIVE").map(toActiveContractLockItem),
-  ...appointments.map(toAppointmentItem)
+  ...appointments.map(toAppointmentItem),
+  ...appointments.filter((appointment) => !["COMPLETED", "REJECTED", "CANCELLED"].includes(appointment.status)).map(toAppointmentLockItem)
 ];
 
 if (args.createTable) {
@@ -251,6 +255,18 @@ function toRentalRequestItem(request) {
   };
 }
 
+function toRentalRequestLockItem(request) {
+  return {
+    PK: `OFFICE#${request.officeId}`,
+    SK: `LOCK#RENTAL_REQUEST#${stableHash(request.email)}`,
+    entityType: "OPEN_RENTAL_REQUEST_LOCK",
+    id: `rental-request-lock-${request.id}`,
+    requestId: request.id,
+    email: request.email,
+    createdAt: now
+  };
+}
+
 function toContractItem(contract) {
   return {
     PK: `OFFICE#${contract.officeId}`,
@@ -298,6 +314,23 @@ function toAppointmentItem(appointment) {
     updatedBy: appointment.email,
     ...appointment
   };
+}
+
+function toAppointmentLockItem(appointment) {
+  return {
+    PK: `OFFICE#${appointment.officeId}`,
+    SK: `LOCK#APPOINTMENT#${stableHash(`${appointment.email}|${appointment.scheduledAt}`)}`,
+    entityType: "APPOINTMENT_LOCK",
+    id: `appointment-lock-${appointment.id}`,
+    appointmentId: appointment.id,
+    email: appointment.email,
+    scheduledAt: appointment.scheduledAt,
+    createdAt: now
+  };
+}
+
+function stableHash(value) {
+  return createHash("sha256").update(String(value).trim().toLowerCase()).digest("hex").slice(0, 32);
 }
 
 function parseArgs(input) {
