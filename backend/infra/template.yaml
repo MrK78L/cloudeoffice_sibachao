@@ -263,6 +263,18 @@ Resources:
             ApiId: !Ref HttpApi
             Path: /{proxy+}
             Method: OPTIONS
+        OptionsAdminRoot:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref HttpApi
+            Path: /admin
+            Method: OPTIONS
+        OptionsAdminProxy:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref HttpApi
+            Path: /admin/{proxy+}
+            Method: OPTIONS
         GetOffices:
           Type: HttpApi
           Properties:
@@ -353,6 +365,14 @@ Resources:
             ApiId: !Ref HttpApi
             Path: /me/contracts
             Method: GET
+            Auth:
+              Authorizer: CognitoJwtAuthorizer
+        CreateMyContractRenewalRequest:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref HttpApi
+            Path: /me/contracts/{id}/renewal-request
+            Method: POST
             Auth:
               Authorizer: CognitoJwtAuthorizer
         GetMyAppointments:
@@ -492,8 +512,8 @@ Resources:
         DailyExpiryCheck:
           Type: ScheduleV2
           Properties:
-            ScheduleExpression: cron(0 1 * * ? *)
-            Description: Check active contracts expiring within 30 days.
+            ScheduleExpression: cron(0/30 * * * ? *)
+            Description: Check contract deadlines and expiry warnings every 30 minutes.
             State: ENABLED
 
   BusinessLogicLogGroup:

@@ -1,5 +1,6 @@
 import { apiDownload, apiRequest } from "../../../lib/apiClient";
 import type { Appointment } from "../../appointments";
+import { translate } from "../../i18n";
 import type { Office } from "../../offices";
 import type { RentalRequest } from "../../rental-requests";
 import {
@@ -7,6 +8,8 @@ import {
   createPreviewCustomer,
   createPreviewOffice,
   createPreviewRentalRequest,
+  createPreviewAppointment,
+  deletePreviewAppointment,
   deletePreviewContract,
   deletePreviewCustomer,
   deletePreviewOffice,
@@ -32,6 +35,13 @@ export type AdminStats = {
   activeContracts: number;
   customers: number;
   pendingAppointments?: number;
+  occupancyRate?: number;
+  expiringContracts?: Contract[];
+  todayAppointments?: Appointment[];
+  officeStatusCounts?: Record<Office["status"], number>;
+  requestStatusCounts?: Record<RentalRequest["status"], number>;
+  appointmentStatusCounts?: Record<Appointment["status"], number>;
+  contractStatusCounts?: Record<Contract["status"], number>;
 };
 
 export type Contract = {
@@ -48,6 +58,11 @@ export type Contract = {
   createdAt?: string;
   updatedAt?: string;
   createdBy?: string;
+  endedAt?: string;
+  renewedAt?: string;
+  renewalDeadline?: string;
+  officeTitle?: string;
+  customerName?: string;
 };
 
 export type Customer = {
@@ -69,6 +84,32 @@ export type OfficePayload = {
   description?: string;
   imageUrl?: string;
   amenities?: string[];
+  buildingId?: string;
+  buildingName?: string;
+  floor?: number;
+  roomNumber?: string;
+  position?: number;
+};
+
+export type CustomerOverview = {
+  customer: Customer;
+  rentalRequests: RentalRequest[];
+  appointments: Appointment[];
+  contracts: Contract[];
+  offices: Record<string, Pick<Office, "id" | "title" | "buildingName" | "floor" | "roomNumber">>;
+  documents: Array<{ contractId: string; fileKey: string }>;
+  activities: Array<{
+    type: "RENTAL_REQUEST" | "APPOINTMENT" | "CONTRACT";
+    id: string;
+    status: string;
+    officeId: string;
+    at: string;
+  }>;
+  summary: {
+    openRequests: number;
+    upcomingAppointments: number;
+    activeContracts: number;
+  };
 };
 
 export type OfficeImageUploadUrl = {
@@ -84,6 +125,8 @@ export type RentalRequestPayload = {
   email: string;
   phone?: string;
   message?: string;
+  requestType?: "NEW_LEASE" | "RENEWAL";
+  renewalContractId?: string;
 };
 
 export type ContractPayload = {
@@ -103,6 +146,15 @@ export type CustomerPayload = {
   email: string;
   phone?: string;
   status: Customer["status"];
+};
+
+export type AppointmentPayload = {
+  officeId: string;
+  customerName: string;
+  email: string;
+  phone?: string;
+  scheduledAt: string;
+  note?: string;
 };
 
 export async function getAdminStats() {
@@ -130,6 +182,39 @@ export async function getAdminCustomers() {
   return getAllAdminItems<Customer>("/admin/customers");
 }
 
+export async function getAdminCustomerOverview(id: string) {
+  if (isAdminPreviewMode) {
+    const customer = getPreviewCustomers().find((item) => item.id === id);
+    if (!customer) throw new Error(translate("Không tìm thấy khách hàng.", "Customer not found."));
+    const rentalRequests = getPreviewRentalRequests().filter((item) => item.email === customer.email);
+    const appointments = getPreviewAppointments().filter((item) => item.email === customer.email);
+    const contracts = getPreviewContracts().filter((item) => item.customerId === customer.id);
+    const offices = Object.fromEntries(getPreviewOffices().map((item) => [item.id, item]));
+    const activities = [
+      ...rentalRequests.map((item) => ({ type: "RENTAL_REQUEST" as const, id: item.id, status: item.status, officeId: item.officeId, at: item.updatedAt ?? item.createdAt })),
+      ...appointments.map((item) => ({ type: "APPOINTMENT" as const, id: item.id, status: item.status, officeId: item.officeId, at: item.updatedAt ?? item.createdAt ?? "" })),
+      ...contracts.map((item) => ({ type: "CONTRACT" as const, id: item.id, status: item.status, officeId: item.officeId, at: item.updatedAt ?? item.createdAt ?? "" }))
+    ].filter((item) => item.at).sort((left, right) => Date.parse(right.at) - Date.parse(left.at));
+    return {
+      item: {
+        customer,
+        rentalRequests,
+        appointments,
+        contracts,
+        offices,
+        documents: contracts.filter((item) => item.fileKey).map((item) => ({ contractId: item.id, fileKey: item.fileKey! })),
+        activities,
+        summary: {
+          openRequests: rentalRequests.filter((item) => ["PENDING", "APPROVED"].includes(item.status)).length,
+          upcomingAppointments: appointments.filter((item) => ["REQUESTED", "CONFIRMED"].includes(item.status)).length,
+          activeContracts: contracts.filter((item) => item.status === "ACTIVE").length
+        }
+      }
+    };
+  }
+  return apiRequest<{ item: CustomerOverview }>(`/admin/customers/${encodeURIComponent(id)}/overview`, { auth: true });
+}
+
 export async function getAdminAppointments() {
   if (isAdminPreviewMode) return { items: getPreviewAppointments(), count: getPreviewAppointments().length };
   return getAllAdminItems<Appointment>("/admin/appointments");
@@ -150,7 +235,16 @@ async function getAllAdminItems<T>(path: string) {
   return { items, count: items.length, nextToken };
 }
 
-export async function updateAdminAppointment(id: string, payload: Pick<Appointment, "status"> & { adminNote?: string }) {
+export async function createAdminAppointment(payload: AppointmentPayload) {
+  if (isAdminPreviewMode) return { item: createPreviewAppointment(payload) };
+  return apiRequest<{ item: Appointment }>("/admin/appointments", {
+    method: "POST",
+    body: payload,
+    auth: true
+  });
+}
+
+export async function updateAdminAppointment(id: string, payload: { status?: Appointment["status"]; scheduledAt?: string; adminNote?: string }) {
   if (isAdminPreviewMode) return { item: updatePreviewAppointment(id, payload) };
   return apiRequest<{ item: Appointment }>(`/admin/appointments/${encodeURIComponent(id)}`, {
     method: "PATCH",
@@ -159,20 +253,20 @@ export async function updateAdminAppointment(id: string, payload: Pick<Appointme
   });
 }
 
-export async function downloadAdminReport(type: "offices" | "customers" | "revenue") {
+export async function deleteAdminAppointment(id: string) {
+  if (isAdminPreviewMode) return { item: deletePreviewAppointment(id), deleted: true };
+  return apiRequest<{ item: Appointment; deleted: boolean }>(`/admin/appointments/${encodeURIComponent(id)}`, {
+    method: "DELETE",
+    auth: true
+  });
+}
+
+export async function downloadAdminReport(type: "offices" | "customers") {
   if (isAdminPreviewMode) {
     const rows = type === "offices"
       ? getPreviewOffices()
-      : type === "customers"
-        ? getPreviewCustomers()
-        : getPreviewContracts().map((item) => ({
-            contractId: item.id,
-            officeId: item.officeId,
-            customerId: item.customerId,
-            status: item.status,
-            monthlyPrice: item.monthlyPrice ?? 0
-          }));
-    const headers = Object.keys(rows[0] ?? { message: "Không có dữ liệu" });
+      : getPreviewCustomers();
+    const headers = Object.keys(rows[0] ?? { message: translate("Không có dữ liệu", "No data") });
     const escape = (value: unknown) => `"${String(value ?? "").replace(/"/g, '""')}"`;
     const csv = [headers.map(escape).join(","), ...rows.map((row) => headers.map((key) => escape((row as Record<string, unknown>)[key])).join(","))].join("\r\n");
     const url = URL.createObjectURL(new Blob(["\uFEFF", csv], { type: "text/csv;charset=utf-8" }));
@@ -228,14 +322,14 @@ export async function uploadOfficeImageToS3(uploadUrl: string, file: File) {
   });
 
   if (!response.ok) {
-    throw new Error("Không thể tải ảnh văn phòng lên hệ thống. Vui lòng thử lại.");
+    throw new Error(translate("Không thể tải ảnh văn phòng lên hệ thống. Vui lòng thử lại.", "Unable to upload the office image. Please try again."));
   }
 }
 
 export async function confirmAdminOfficeImage(id: string, key: string) {
   if (isAdminPreviewMode) {
     const item = getPreviewOffices().find((office) => office.id === id);
-    if (!item) throw new Error("Không tìm thấy văn phòng.");
+    if (!item) throw new Error(translate("Không tìm thấy văn phòng.", "Office not found."));
     return { item };
   }
   return apiRequest<{ item: Office }>(`/admin/offices/${encodeURIComponent(id)}/image`, {

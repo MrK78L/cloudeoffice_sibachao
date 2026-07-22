@@ -9,9 +9,12 @@
   "scripts": {
     "frontend:install": "npm install --prefix frontend",
     "frontend:dev": "npm --prefix frontend run dev",
+    "frontend:dev:aws": "npm --prefix frontend run dev -- --host localhost --port 5173 --strictPort",
     "frontend:build": "npm --prefix frontend run build",
     "backend:install": "npm --prefix backend run install:all",
     "backend:build": "npm --prefix backend run build",
+    "backend:deploy:dev": "npm --prefix backend run deploy:dev",
+    "backend:sync:frontend-env": "npm --prefix backend run sync:frontend-env",
     "backend:deploy": "npm --prefix backend run deploy",
     "backend:delete": "npm --prefix backend run delete"
   }

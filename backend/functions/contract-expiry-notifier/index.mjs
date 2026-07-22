@@ -61,18 +61,21 @@ async function expireContract(contract, nowIso) {
     console.warn(`Skip contract expiration because the office lock belongs to another contract: ${contract.id}`);
     return false;
   }
+  const renewalDeadline = new Date(Date.parse(nowIso) + 3 * 24 * 60 * 60 * 1000).toISOString();
+  const rentalRequest = contract.rentalRequestId ? await getRentalRequest(contract.rentalRequestId) : null;
 
   const transactItems = [
     {
       Update: {
         TableName: tableName,
         Key: { PK: contract.PK, SK: contract.SK },
-        UpdateExpression: "SET #status = :expired, expiredAt = :now, updatedAt = :now, updatedBy = :actor",
+        UpdateExpression: "SET #status = :expired, expiredAt = :now, endedAt = :now, renewalDeadline = :renewalDeadline, updatedAt = :now, updatedBy = :actor REMOVE rentalRequestId",
         ExpressionAttributeNames: { "#status": "status" },
         ExpressionAttributeValues: {
           ":active": "ACTIVE",
           ":expired": "EXPIRED",
           ":now": nowIso,
+          ":renewalDeadline": renewalDeadline,
           ":actor": "contract-expiry-notifier"
         },
         ConditionExpression: "#status = :active"
@@ -105,6 +108,19 @@ async function expireContract(contract, nowIso) {
       }
     });
   }
+  if (rentalRequest && !rentalRequest.deletedAt && rentalRequest.status === "APPROVED") {
+    transactItems.push({
+      Delete: {
+        TableName: tableName,
+        Key: { PK: rentalRequest.PK, SK: rentalRequest.SK },
+        ExpressionAttributeNames: { "#status": "status" },
+        ExpressionAttributeValues: {
+          ":approved": "APPROVED"
+        },
+        ConditionExpression: "attribute_exists(PK) AND attribute_exists(SK) AND #status = :approved"
+      }
+    });
+  }
 
   try {
     await dynamo.send(new TransactWriteCommand({ TransactItems: transactItems }));
@@ -116,6 +132,17 @@ async function expireContract(contract, nowIso) {
     }
     throw error;
   }
+}
+
+async function getRentalRequest(id) {
+  const result = await dynamo.send(new QueryCommand({
+    TableName: tableName,
+    IndexName: "GSI2",
+    KeyConditionExpression: "GSI2PK = :pk AND GSI2SK = :sk",
+    ExpressionAttributeValues: { ":pk": `REQUEST#${id}`, ":sk": "METADATA" },
+    Limit: 1
+  }));
+  return result.Items?.[0] ?? null;
 }
 
 async function markWarningSent(contract, nowIso) {

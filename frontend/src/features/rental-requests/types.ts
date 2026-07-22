@@ -4,6 +4,8 @@ export type RentalRequest = {
   customerName: string;
   email: string;
   message?: string;
+  requestType?: "NEW_LEASE" | "RENEWAL";
+  renewalContractId?: string;
   phone?: string;
   status: "PENDING" | "APPROVED" | "REJECTED" | "CANCELLED";
   decisionNote?: string;
@@ -12,4 +14,4 @@ export type RentalRequest = {
   createdBy?: string;
 };
 
-export type CreateRentalRequestInput = Pick<RentalRequest, "officeId" | "customerName" | "email" | "phone" | "message">;
+export type CreateRentalRequestInput = Pick<RentalRequest, "officeId" | "customerName" | "phone" | "message">;

@@ -11,7 +11,7 @@ stack_name = "cloffice-backend"
 resolve_s3 = true
 s3_prefix = "cloffice-backend"
 capabilities = "CAPABILITY_IAM"
-parameter_overrides = "ProjectName=\"cloffice\" AlertEmail=\"phuocloc782004@gmail.com\" CorsAllowOrigin=\"*\" EnableCloudFront=\"false\""
+parameter_overrides = "ProjectName=\"cloffice\" AlertEmail=\"phuocloc782004@gmail.com\" CorsAllowOrigin=\"http://localhost:5173\" EnableCloudFront=\"false\" CloudFrontWebAclArn=\"\" EnablePointInTimeRecovery=\"false\""
 image_repositories = []
 confirm_changeset = true
 

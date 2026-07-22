@@ -1,3 +1,5 @@
+import { translate } from "../i18n";
+
 const sessionKey = "orms.auth.session";
 export const authSessionChangedEvent = "orms:auth-session-changed";
 let refreshAccessTokenPromise: Promise<string> | null = null;
@@ -53,7 +55,7 @@ export type ConfirmForgotPasswordInput = {
 
 export class NewPasswordRequiredError extends Error {
   constructor(public readonly challengeSession: string) {
-    super("Bạn cần đặt mật khẩu mới để hoàn tất đăng nhập.");
+    super(translate("Bạn cần đặt mật khẩu mới để hoàn tất đăng nhập.", "You need to set a new password to complete sign-in."));
     this.name = "NewPasswordRequiredError";
   }
 }
@@ -115,6 +117,12 @@ export async function getValidAccessToken() {
   return await refreshAccessTokenPromise;
 }
 
+export async function getValidApiToken() {
+  await getValidAccessToken();
+  const session = readStoredAuthSession();
+  return session?.idToken ?? session?.accessToken ?? null;
+}
+
 async function refreshAccessToken(session: AuthSession) {
   try {
     const response = await callCognito<{ AuthenticationResult?: CognitoTokenResponse }>("InitiateAuth", {
@@ -128,7 +136,7 @@ async function refreshAccessToken(session: AuthSession) {
     return refreshed.accessToken;
   } catch {
     logout();
-    throw new Error("Phiên đăng nhập đã hết hạn. Vui lòng đăng nhập lại.");
+    throw new Error(translate("Phiên đăng nhập đã hết hạn. Vui lòng đăng nhập lại.", "Your session has expired. Please sign in again."));
   }
 }
 
@@ -166,7 +174,7 @@ export async function signInWithEmailPassword(input: SignInInput): Promise<AuthS
     throw new NewPasswordRequiredError(response.Session);
   }
   if (!response.AuthenticationResult?.AccessToken) {
-    throw new Error("Không thể đăng nhập lúc này. Vui lòng thử lại.");
+    throw new Error(translate("Không thể đăng nhập lúc này. Vui lòng thử lại.", "Unable to sign in right now. Please try again."));
   }
 
   const session = createAuthSession(response.AuthenticationResult);
@@ -185,7 +193,7 @@ export async function completeNewPasswordChallenge(email: string, password: stri
     }
   });
   if (!response.AuthenticationResult?.AccessToken) {
-    throw new Error("Không thể hoàn tất thay đổi mật khẩu. Vui lòng thử lại.");
+    throw new Error(translate("Không thể hoàn tất thay đổi mật khẩu. Vui lòng thử lại.", "Unable to complete the password change. Please try again."));
   }
 
   const session = createAuthSession(response.AuthenticationResult);
@@ -245,7 +253,7 @@ export async function confirmPasswordReset(input: ConfirmForgotPasswordInput) {
 export async function changePassword(previousPassword: string, proposedPassword: string) {
   const session = getAuthSession();
   if (!session?.accessToken) {
-    throw new Error("Vui lòng đăng nhập để tiếp tục.");
+    throw new Error(translate("Vui lòng đăng nhập để tiếp tục.", "Please sign in to continue."));
   }
 
   return callCognito("ChangePassword", {
@@ -269,7 +277,7 @@ async function callCognito<T>(action: string, body: unknown): Promise<T> {
       body: JSON.stringify(body)
     });
   } catch {
-    throw new Error("Không thể kết nối hệ thống đăng nhập. Vui lòng kiểm tra mạng và thử lại.");
+    throw new Error(translate("Không thể kết nối hệ thống đăng nhập. Vui lòng kiểm tra mạng và thử lại.", "Unable to connect to the sign-in service. Check your network and try again."));
   }
 
   const payload = await response.json().catch(() => ({}));
@@ -282,7 +290,7 @@ async function callCognito<T>(action: string, body: unknown): Promise<T> {
 
 function requireClientId() {
   if (!cognitoConfig.clientId) {
-    throw new Error("Hệ thống đăng nhập chưa sẵn sàng. Vui lòng thử lại sau.");
+    throw new Error(translate("Hệ thống đăng nhập chưa sẵn sàng. Vui lòng thử lại sau.", "The sign-in service is not ready. Please try again later."));
   }
   return cognitoConfig.clientId;
 }
@@ -290,7 +298,7 @@ function requireClientId() {
 function getRegion() {
   const region = cognitoConfig.userPoolId.split("_")[0];
   if (!region) {
-    throw new Error("Hệ thống đăng nhập chưa sẵn sàng. Vui lòng thử lại sau.");
+    throw new Error(translate("Hệ thống đăng nhập chưa sẵn sàng. Vui lòng thử lại sau.", "The sign-in service is not ready. Please try again later."));
   }
   return region;
 }
@@ -315,13 +323,13 @@ function decodeJwtPayload(token: string): Record<string, unknown> | null {
 
 function toFriendlyAuthError(error: CognitoApiError) {
   const type = error.__type?.split("#").pop() ?? "";
-  if (type === "NotAuthorizedException") return "Email hoặc mật khẩu không đúng.";
-  if (type === "UserNotConfirmedException") return "Tài khoản chưa xác thực email. Vui lòng nhập mã xác nhận.";
-  if (type === "UsernameExistsException") return "Email này đã được đăng ký.";
-  if (type === "CodeMismatchException") return "Mã xác nhận không đúng.";
-  if (type === "ExpiredCodeException") return "Mã xác nhận đã hết hạn.";
-  if (type === "InvalidPasswordException") return "Mật khẩu cần tối thiểu 8 ký tự, có chữ hoa, chữ thường và số.";
-  if (type === "UserNotFoundException") return "Không tìm thấy tài khoản với email này.";
-  if (type === "LimitExceededException") return "Bạn thao tác quá nhiều lần. Vui lòng thử lại sau.";
-  return "Không thể xử lý yêu cầu đăng nhập. Vui lòng thử lại.";
+  if (type === "NotAuthorizedException") return translate("Email hoặc mật khẩu không đúng.", "Incorrect email or password.");
+  if (type === "UserNotConfirmedException") return translate("Tài khoản chưa xác thực email. Vui lòng nhập mã xác nhận.", "Your email has not been verified. Please enter the verification code.");
+  if (type === "UsernameExistsException") return translate("Email này đã được đăng ký.", "This email is already registered.");
+  if (type === "CodeMismatchException") return translate("Mã xác nhận không đúng.", "The verification code is incorrect.");
+  if (type === "ExpiredCodeException") return translate("Mã xác nhận đã hết hạn.", "The verification code has expired.");
+  if (type === "InvalidPasswordException") return translate("Mật khẩu cần tối thiểu 8 ký tự, có chữ hoa, chữ thường và số.", "The password must contain at least 8 characters, including uppercase, lowercase and a number.");
+  if (type === "UserNotFoundException") return translate("Không tìm thấy tài khoản với email này.", "No account was found for this email.");
+  if (type === "LimitExceededException") return translate("Bạn thao tác quá nhiều lần. Vui lòng thử lại sau.", "Too many attempts. Please try again later.");
+  return translate("Không thể xử lý yêu cầu đăng nhập. Vui lòng thử lại.", "Unable to process the sign-in request. Please try again.");
 }

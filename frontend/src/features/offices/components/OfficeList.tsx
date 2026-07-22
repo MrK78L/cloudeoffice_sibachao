@@ -3,20 +3,13 @@ import { OfficeCard } from "./OfficeCard";
 
 type OfficeListProps = {
   offices: Office[];
-  selectedOfficeId?: string;
-  onSelect?: (office: Office) => void;
 };
 
-export function OfficeList({ offices, selectedOfficeId, onSelect }: OfficeListProps) {
+export function OfficeList({ offices }: OfficeListProps) {
   return (
-    <div className="office-list">
+    <div className="office-card-grid">
       {offices.map((office) => (
-        <OfficeCard
-          active={office.id === selectedOfficeId}
-          key={office.id}
-          office={office}
-          onSelect={onSelect}
-        />
+        <OfficeCard key={office.id} office={office} />
       ))}
     </div>
   );

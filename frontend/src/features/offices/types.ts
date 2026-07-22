@@ -5,6 +5,11 @@ export type Office = {
   areaSqm: number;
   monthlyPrice: number;
   status: "AVAILABLE" | "RESERVED" | "LEASED" | "INACTIVE";
+  buildingId?: string;
+  buildingName?: string;
+  floor?: number;
+  roomNumber?: string;
+  position?: number;
   description?: string;
   imageUrl?: string;
   externalImageUrl?: string;
@@ -20,4 +25,5 @@ export type OfficeSearchParams = {
   q?: string;
   status?: Office["status"];
   nextToken?: string;
+  limit?: number;
 };

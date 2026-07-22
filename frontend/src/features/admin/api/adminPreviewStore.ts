@@ -3,6 +3,7 @@ import type { RentalRequest } from "../../rental-requests";
 import type { Appointment } from "../../appointments";
 import type {
   AdminStats,
+  AppointmentPayload,
   Contract,
   ContractPayload,
   Customer,
@@ -31,6 +32,11 @@ const initialData: PreviewData = {
       areaSqm: 120,
       monthlyPrice: 72000000,
       status: "AVAILABLE",
+      buildingId: "central-plaza",
+      buildingName: "Central Plaza",
+      floor: 12,
+      roomNumber: "1201",
+      position: 1,
       imageUrl: "https://images.unsplash.com/photo-1497366754035-f200968a6e72?auto=format&fit=crop&w=480&q=80",
       amenities: ["Lễ tân", "Phòng họp", "Internet tốc độ cao"],
       createdAt: now
@@ -42,6 +48,11 @@ const initialData: PreviewData = {
       areaSqm: 85,
       monthlyPrice: 39000000,
       status: "RESERVED",
+      buildingId: "etown-office",
+      buildingName: "Etown Office",
+      floor: 3,
+      roomNumber: "302",
+      position: 1,
       imageUrl: "https://images.unsplash.com/photo-1497366811353-6870744d04b2?auto=format&fit=crop&w=480&q=80",
       amenities: ["Bãi xe", "Pantry", "An ninh 24/7"],
       createdAt: now
@@ -53,6 +64,11 @@ const initialData: PreviewData = {
       areaSqm: 160,
       monthlyPrice: 89000000,
       status: "LEASED",
+      buildingId: "metro-business-hub",
+      buildingName: "Metro Business Hub",
+      floor: 8,
+      roomNumber: "805",
+      position: 1,
       imageUrl: "https://images.unsplash.com/photo-1497366216548-37526070297c?auto=format&fit=crop&w=480&q=80",
       amenities: ["Sảnh chờ", "Phòng họp lớn", "Điều hòa trung tâm"],
       createdAt: now
@@ -83,7 +99,7 @@ const initialData: PreviewData = {
     {
       id: "contract-2026-001",
       officeId: "office-tp-0805",
-      customerId: "customer-002",
+      customerId: "quochuy@example.com",
       title: "Hợp đồng thuê văn phòng Thủ Đức",
       status: "ACTIVE",
       startDate: "2026-06-01",
@@ -132,6 +148,22 @@ function readData(): PreviewData {
       data.appointments = cloneInitialData().appointments;
       writeData(data);
     }
+    const fallbackLocations = cloneInitialData().offices;
+    let changed = false;
+    data.offices = data.offices.map((office, index) => {
+      if (office.buildingId) return office;
+      changed = true;
+      const fallback = fallbackLocations[index % fallbackLocations.length];
+      return {
+        ...office,
+        buildingId: fallback.buildingId,
+        buildingName: fallback.buildingName,
+        floor: fallback.floor,
+        roomNumber: office.id.split("-").slice(-1)[0] ?? fallback.roomNumber,
+        position: index + 1
+      };
+    });
+    if (changed) writeData(data);
     return data;
   } catch {
     const data = cloneInitialData();
@@ -148,13 +180,55 @@ function createId(prefix: string) {
   return `${prefix}-${Date.now().toString(36)}`;
 }
 
+function overlaps(startA: string, endA: string, startB: string, endB: string) {
+  return Date.parse(startA) < Date.parse(endB) && Date.parse(startB) < Date.parse(endA);
+}
+
+function appointmentEnd(scheduledAt: string) {
+  return new Date(Date.parse(scheduledAt) + 30 * 60_000).toISOString();
+}
+
+function assertPreviewAppointmentAvailable(data: PreviewData, officeId: string, scheduledAt: string) {
+  const conflict = data.contracts.some((contract) => contract.officeId === officeId && ["PENDING_SIGNATURE", "ACTIVE"].includes(contract.status) && contract.startDate && contract.endDate && overlaps(scheduledAt, appointmentEnd(scheduledAt), contract.startDate, contract.endDate));
+  if (conflict) throw new Error("Thời gian này nằm trong thời hạn văn phòng đã được ký thuê. Vui lòng chọn lịch khác.");
+}
+
+function assertPreviewContractAvailable(data: PreviewData, contract: Contract, excludedId = "") {
+  if (!["PENDING_SIGNATURE", "ACTIVE"].includes(contract.status) || !contract.startDate || !contract.endDate) return;
+  const contractConflict = data.contracts.some((item) => item.id !== excludedId && item.officeId === contract.officeId && ["PENDING_SIGNATURE", "ACTIVE"].includes(item.status) && item.startDate && item.endDate && overlaps(contract.startDate!, contract.endDate!, item.startDate, item.endDate));
+  if (contractConflict) throw new Error("Khoảng thời gian này trùng với một hợp đồng khác của văn phòng.");
+  const appointmentConflict = data.appointments.some((item) => item.officeId === contract.officeId && ["REQUESTED", "CONFIRMED"].includes(item.status) && overlaps(item.scheduledAt, appointmentEnd(item.scheduledAt), contract.startDate!, contract.endDate!));
+  if (appointmentConflict) throw new Error("Hợp đồng trùng với lịch xem văn phòng đang được xử lý.");
+}
+
+function applyPreviewContractActivation(data: PreviewData, contract: Contract) {
+  data.offices = data.offices.map((office) => office.id === contract.officeId ? { ...office, status: "LEASED" } : office);
+  data.rentalRequests = data.rentalRequests.map((request) => {
+    if (request.id === contract.rentalRequestId) return { ...request, status: "APPROVED", updatedAt: new Date().toISOString() };
+    if (request.officeId === contract.officeId && ["PENDING", "APPROVED"].includes(request.status)) {
+      return { ...request, status: "REJECTED", decisionNote: "Văn phòng đã được ký hợp đồng với khách hàng khác.", updatedAt: new Date().toISOString() };
+    }
+    return request;
+  });
+}
+
 export function getPreviewStats(): AdminStats {
   const data = readData();
+  const activeOffices = data.offices.filter((item) => item.status !== "INACTIVE");
+  const activeContracts = data.contracts.filter((item) => item.status === "ACTIVE");
+  const nowTime = Date.now();
+  const warningEnd = nowTime + (30 * 24 * 60 * 60 * 1000);
   return {
-    offices: data.offices.length,
+    offices: activeOffices.length,
     pendingRentalRequests: data.rentalRequests.filter((item) => item.status === "PENDING").length,
-    activeContracts: data.contracts.filter((item) => item.status === "ACTIVE").length,
-    customers: data.customers.length
+    activeContracts: activeContracts.length,
+    customers: data.customers.filter((item) => item.status !== "INACTIVE").length,
+    pendingAppointments: data.appointments.filter((item) => item.status === "REQUESTED").length,
+    occupancyRate: activeOffices.length ? Math.round((activeContracts.length / activeOffices.length) * 100) : 0,
+    expiringContracts: activeContracts.filter((item) => item.endDate && Date.parse(item.endDate) >= nowTime && Date.parse(item.endDate) <= warningEnd),
+    todayAppointments: data.appointments.filter((item) => item.scheduledAt.slice(0, 10) === new Date().toISOString().slice(0, 10) && ["REQUESTED", "CONFIRMED"].includes(item.status)),
+    officeStatusCounts: Object.fromEntries(["AVAILABLE", "RESERVED", "LEASED", "INACTIVE"].map((status) => [status, data.offices.filter((item) => item.status === status).length])) as Record<Office["status"], number>,
+    requestStatusCounts: Object.fromEntries(["PENDING", "APPROVED", "REJECTED", "CANCELLED"].map((status) => [status, data.rentalRequests.filter((item) => item.status === status).length])) as Record<RentalRequest["status"], number>
   };
 }
 
@@ -164,13 +238,39 @@ export const getPreviewContracts = () => readData().contracts;
 export const getPreviewCustomers = () => readData().customers;
 export const getPreviewAppointments = () => readData().appointments ?? [];
 
-export function updatePreviewAppointment(id: string, payload: Pick<Appointment, "status"> & { adminNote?: string }) {
+export function createPreviewAppointment(payload: AppointmentPayload) {
+  const data = readData();
+  data.appointments ??= [];
+  assertPreviewAppointmentAvailable(data, payload.officeId, payload.scheduledAt);
+  const item: Appointment = {
+    id: createId("appointment"),
+    ...payload,
+    status: "REQUESTED",
+    createdAt: new Date().toISOString()
+  };
+  data.appointments.unshift(item);
+  writeData(data);
+  return item;
+}
+
+export function updatePreviewAppointment(id: string, payload: { status?: Appointment["status"]; scheduledAt?: string; adminNote?: string }) {
   const data = readData();
   data.appointments ??= [];
   const index = data.appointments.findIndex((item) => item.id === id);
   if (index < 0) throw new Error("Không tìm thấy lịch hẹn.");
   const item = { ...data.appointments[index], ...payload, updatedAt: new Date().toISOString() };
+  if (["REQUESTED", "CONFIRMED"].includes(item.status)) assertPreviewAppointmentAvailable(data, item.officeId, item.scheduledAt);
   data.appointments[index] = item;
+  writeData(data);
+  return item;
+}
+
+export function deletePreviewAppointment(id: string) {
+  const data = readData();
+  data.appointments ??= [];
+  const item = data.appointments.find((appointment) => appointment.id === id);
+  if (!item) throw new Error("Không tìm thấy lịch hẹn.");
+  data.appointments = data.appointments.filter((appointment) => appointment.id !== id);
   writeData(data);
   return item;
 }
@@ -239,7 +339,9 @@ export function deletePreviewRentalRequest(id: string) {
 export function createPreviewContract(payload: ContractPayload) {
   const data = readData();
   const item: Contract = { id: createId("contract"), ...payload, createdAt: new Date().toISOString() };
+  assertPreviewContractAvailable(data, item);
   data.contracts.unshift(item);
+  if (item.status === "ACTIVE") applyPreviewContractActivation(data, item);
   writeData(data);
   return item;
 }
@@ -248,8 +350,33 @@ export function updatePreviewContract(id: string, payload: Partial<ContractPaylo
   const data = readData();
   const index = data.contracts.findIndex((item) => item.id === id);
   if (index < 0) throw new Error("Không tìm thấy hợp đồng.");
-  const item = { ...data.contracts[index], ...payload, updatedAt: new Date().toISOString() };
+  const current = data.contracts[index];
+  const updatedAt = new Date().toISOString();
+  const isEnding = current.status === "ACTIVE" && ["EXPIRED", "TERMINATED"].includes(payload.status ?? "");
+  const isRenewing = ["EXPIRED", "TERMINATED"].includes(current.status) && payload.status === "ACTIVE";
+  if (isRenewing && (!current.renewalDeadline || Date.now() > Date.parse(current.renewalDeadline))) {
+    throw new Error("Thời hạn gia hạn 3 ngày đã kết thúc. Vui lòng tạo hợp đồng mới.");
+  }
+  if (isRenewing) {
+    const renewalRequest = data.rentalRequests.find((request) => request.id === payload.rentalRequestId && request.requestType === "RENEWAL" && request.renewalContractId === current.id && request.status === "APPROVED");
+    if (!renewalRequest) throw new Error("Yêu cầu gia hạn phải được khách hàng gửi và được duyệt trước.");
+  }
+  const item: Contract = {
+    ...current,
+    ...payload,
+    ...(isEnding ? { endedAt: updatedAt, renewalDeadline: new Date(Date.now() + 3 * 24 * 60 * 60 * 1000).toISOString(), rentalRequestId: undefined } : {}),
+    ...(isRenewing ? { renewedAt: updatedAt, renewalDeadline: undefined } : {}),
+    updatedAt
+  };
+  assertPreviewContractAvailable(data, item, current.id);
   data.contracts[index] = item;
+  if (isEnding) {
+    data.offices = data.offices.map((office) => office.id === current.officeId ? { ...office, status: "AVAILABLE" } : office);
+    if (current.rentalRequestId) data.rentalRequests = data.rentalRequests.filter((request) => request.id !== current.rentalRequestId);
+  }
+  if (isRenewing) {
+    applyPreviewContractActivation(data, item);
+  }
   writeData(data);
   return item;
 }
@@ -260,6 +387,10 @@ export function deletePreviewContract(id: string) {
   if (!item) throw new Error("Không tìm thấy hợp đồng.");
   if (["ACTIVE", "PENDING_SIGNATURE"].includes(item.status)) {
     throw new Error("Hợp đồng đang hiệu lực hoặc chờ ký nên chưa thể xóa.");
+  }
+  if (!["EXPIRED", "TERMINATED"].includes(item.status)) throw new Error("Chỉ có thể xóa hợp đồng đã kết thúc.");
+  if (!item.renewalDeadline || Date.now() < Date.parse(item.renewalDeadline)) {
+    throw new Error("Hợp đồng đang trong thời gian chờ gia hạn 3 ngày nên chưa thể xóa.");
   }
   data.contracts = data.contracts.filter((contract) => contract.id !== id);
   writeData(data);

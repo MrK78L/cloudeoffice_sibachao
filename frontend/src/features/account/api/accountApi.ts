@@ -1,6 +1,7 @@
 import { apiRequest } from "../../../lib/apiClient";
 import type { Contract } from "../../admin/api/adminApi";
 import type { RentalRequest } from "../../rental-requests";
+import { translate } from "../../i18n";
 
 export type UserProfile = {
   id: string;
@@ -30,6 +31,14 @@ export async function getMyContracts() {
   return apiRequest<{ items: Contract[]; count: number }>("/me/contracts", { auth: true });
 }
 
+export async function createContractRenewalRequest(contractId: string, message?: string) {
+  return apiRequest<{ item: RentalRequest }>(`/me/contracts/${encodeURIComponent(contractId)}/renewal-request`, {
+    method: "POST",
+    body: { message },
+    auth: true
+  });
+}
+
 export async function getMyProfile() {
   return apiRequest<{ item: UserProfile }>("/me/profile", { auth: true });
 }
@@ -48,7 +57,7 @@ export async function createMyAvatarUploadUrl(file: File) {
 
 export async function uploadMyAvatar(uploadUrl: string, file: File) {
   const response = await fetch(uploadUrl, { method: "PUT", headers: { "Content-Type": file.type }, body: file });
-  if (!response.ok) throw new Error("Không thể tải ảnh đại diện lên hệ thống.");
+  if (!response.ok) throw new Error(translate("Không thể tải ảnh đại diện lên hệ thống.", "Unable to upload the profile picture."));
 }
 
 export async function confirmMyAvatar(key: string) {
@@ -65,7 +74,7 @@ export async function createContractFileUploadUrl(contractId: string, file: File
 
 export async function uploadContractFile(uploadUrl: string, file: File) {
   const response = await fetch(uploadUrl, { method: "PUT", headers: { "Content-Type": "application/pdf" }, body: file });
-  if (!response.ok) throw new Error("Không thể tải hợp đồng lên hệ thống.");
+  if (!response.ok) throw new Error(translate("Không thể tải hợp đồng lên hệ thống.", "Unable to upload the contract."));
 }
 
 export async function confirmContractFile(contractId: string, key: string) {

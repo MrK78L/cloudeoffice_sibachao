@@ -1,5 +1,6 @@
-import { getValidAccessToken, logout } from "../features/auth/cognito";
+import { getValidApiToken, logout } from "../features/auth/cognito";
 import { toFriendlyApiError, toFriendlyNetworkError } from "./friendlyErrors";
+import { translate } from "../features/i18n";
 
 const apiBaseUrl = import.meta.env.VITE_API_BASE_URL ?? "";
 
@@ -11,10 +12,10 @@ type ApiRequestOptions = {
 
 export async function apiRequest<T>(path: string, options: ApiRequestOptions = {}): Promise<T> {
   if (!apiBaseUrl) {
-    throw new Error("Hệ thống chưa sẵn sàng. Vui lòng thử lại sau.");
+    throw new Error(translate("Hệ thống chưa sẵn sàng. Vui lòng thử lại sau.", "The service is not ready. Please try again later."));
   }
 
-  const token = options.auth ? await getValidAccessToken() : undefined;
+  const token = options.auth ? await getValidApiToken() : undefined;
   let response: Response;
 
   try {
@@ -44,7 +45,7 @@ export async function apiRequest<T>(path: string, options: ApiRequestOptions = {
 }
 
 export async function apiDownload(path: string, fileName: string) {
-  const token = await getValidAccessToken();
+  const token = await getValidApiToken();
   let response: Response;
   try {
     response = await fetchWithTimeout(`${apiBaseUrl}${path}`, {

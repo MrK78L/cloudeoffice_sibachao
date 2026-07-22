@@ -113,7 +113,7 @@ aws sts get-caller-identity
 Chay tu thu muc goc:
 
 ```powershell
-cd D:\THUCTAPTT\cloudoffice
+cd \cloudoffice
 
 # Cai dependencies frontend
 npm run frontend:install
@@ -216,14 +216,30 @@ Can lay cac gia tri sau de cau hinh frontend:
 
 ## Seed du lieu mau
 
-Seed len DynamoDB tren AWS:
+Kiem tra seed ma khong ghi du lieu:
+
+```powershell
+cd D:\THUCTAPTT\cloudoffice\backend
+npm run seed:check
+```
+
+Seed 20 van phong len DynamoDB tren AWS ma khong xoa du lieu hien co:
 
 ```powershell
 cd D:\THUCTAPTT\cloudoffice\backend
 npm run seed -- --table cloffice-offices-table --region ap-southeast-1
 ```
 
-Seed local voi DynamoDB Local:
+Xoa sach DynamoDB AWS roi seed lai 20 van phong. Ten bang phai duoc truyen lai sau `--confirm-reset` de xac nhan:
+
+```powershell
+cd D:\THUCTAPTT\cloudoffice\backend
+npm run seed:reset
+```
+
+Reset DynamoDB khong xoa tai khoan trong Cognito. Lenh reset se xoa customer, request, appointment, contract va cac du lieu nghiep vu khac trong cung bang.
+
+Seed local voi DynamoDB Local. Lenh nay tu tao bang neu can, xoa du lieu cu va seed lai 20 van phong:
 
 ```powershell
 cd D:\THUCTAPTT\cloudoffice\backend
@@ -316,6 +332,10 @@ Tong hop cac chuc nang backend moi, migration DynamoDB, lich hen, upload S3, can
 Huong dan deploy AWS theo tung giai doan, CloudFront va WAF tuy chon:
 
 [docs/12-huong-dan-deploy-du-an-aws.md](docs/12-huong-dan-deploy-du-an-aws.md)
+
+Chuc nang Customer 360, so do tang, pipeline yeu cau thue, dashboard van hanh va bao cao:
+
+[docs/14-quan-ly-van-hanh-nang-cao.md](docs/14-quan-ly-van-hanh-nang-cao.md)
 
 Nen doc file nay khi can deploy that, xu ly loi CORS, Cognito, CloudFront, seed DynamoDB hoac upload hinh anh len S3.
 

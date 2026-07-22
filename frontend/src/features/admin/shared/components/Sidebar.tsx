@@ -1,15 +1,22 @@
 import { navigate } from "../../../../app/router";
+import { useLanguage } from "../../../i18n";
 
-const items = [
-  { path: "/admin", label: "Tổng quan", icon: "DB" },
-  { path: "/admin/offices", label: "Văn phòng", icon: "VP" },
-  { path: "/admin/requests", label: "Yêu cầu thuê", icon: "YC" },
-  { path: "/admin/appointments", label: "Lịch hẹn", icon: "LH" },
-  { path: "/admin/contracts", label: "Hợp đồng", icon: "HĐ" },
-  { path: "/admin/customers", label: "Khách hàng", icon: "KH" }
-];
+type SidebarProps = {
+  activePath: string;
+  collapsed: boolean;
+  onToggle: () => void;
+};
 
-export function Sidebar({ activePath }: { activePath: string }) {
+export function Sidebar({ activePath, collapsed, onToggle }: SidebarProps) {
+  const { tr } = useLanguage();
+  const items = [
+    { path: "/admin", label: tr("Tổng quan", "Overview"), icon: "DB" },
+    { path: "/admin/offices", label: tr("Văn phòng", "Offices"), icon: "OF" },
+    { path: "/admin/requests", label: tr("Yêu cầu thuê", "Requests"), icon: "RQ" },
+    { path: "/admin/appointments", label: tr("Lịch hẹn", "Appointments"), icon: "AP" },
+    { path: "/admin/contracts", label: tr("Hợp đồng", "Contracts"), icon: "CT" },
+    { path: "/admin/customers", label: tr("Khách hàng", "Customers"), icon: "CU" }
+  ];
   return (
     <aside className="admin-sidebar">
       <div className="admin-brand">
@@ -18,6 +25,9 @@ export function Sidebar({ activePath }: { activePath: string }) {
           <strong>Cloud Office</strong>
           <small>Management</small>
         </div>
+        <button aria-label={collapsed ? tr("Mở rộng thanh bên", "Expand sidebar") : tr("Thu gọn thanh bên", "Collapse sidebar")} className="admin-sidebar-toggle" onClick={onToggle} title={collapsed ? tr("Mở rộng", "Expand") : tr("Thu gọn", "Collapse")} type="button">
+          {collapsed ? ">" : "<"}
+        </button>
       </div>
       <nav>
         {items.map((item) => (
@@ -28,7 +38,7 @@ export function Sidebar({ activePath }: { activePath: string }) {
             type="button"
           >
             <span>{item.icon}</span>
-            {item.label}
+            <span className="admin-nav-label">{item.label}</span>
           </button>
         ))}
       </nav>

@@ -10,6 +10,7 @@ export type Appointment = {
   status: "REQUESTED" | "CONFIRMED" | "COMPLETED" | "REJECTED" | "CANCELLED";
   createdAt?: string;
   updatedAt?: string;
+  officeTitle?: string;
 };
 
-export type CreateAppointmentInput = Pick<Appointment, "officeId" | "customerName" | "email" | "phone" | "scheduledAt" | "note">;
+export type CreateAppointmentInput = Pick<Appointment, "officeId" | "customerName" | "phone" | "scheduledAt" | "note">;
